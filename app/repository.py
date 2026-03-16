@@ -64,14 +64,14 @@ def create_event(
             insert into notification_outbox (recipient_user_id, event_id, kind, payload, scheduled_for, dedupe_key)
             select
                 s.subscriber_user_id,
-                %s,
+                %s::uuid,
                 'new_event_subscription',
-                jsonb_build_object('title', %s, 'category', %s),
+                jsonb_build_object('title', %s::text, 'category', %s::text),
                 now(),
-                concat('new_event_subscription:', s.subscriber_user_id::text, ':', %s::text)
+                concat('new_event_subscription:', s.subscriber_user_id::text, ':', %s::uuid::text)
             from event_subscriptions s
-            where (s.kind = 'category' and s.category = %s)
-               or (s.kind = 'creator' and s.creator_user_id = %s)
+            where (s.kind = 'category' and s.category = %s::event_category)
+               or (s.kind = 'creator' and s.creator_user_id = %s::uuid)
             on conflict (dedupe_key) do nothing
             """,
             (
