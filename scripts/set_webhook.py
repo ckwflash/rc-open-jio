@@ -1,0 +1,33 @@
+from __future__ import annotations
+
+import os
+
+import httpx
+from dotenv import load_dotenv
+
+
+def main() -> None:
+    load_dotenv()
+    token = os.getenv("BOT_TOKEN", "")
+    secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+    webhook_url = os.getenv("WEBHOOK_URL", "")
+
+    if not token or not secret or not webhook_url:
+        raise SystemExit("Please set BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET and WEBHOOK_URL in environment")
+
+    url = f"https://api.telegram.org/bot{token}/setWebhook"
+    payload = {
+        "url": webhook_url,
+        "secret_token": secret,
+        "allowed_updates": ["message", "callback_query"],
+        "drop_pending_updates": True,
+    }
+
+    with httpx.Client(timeout=20) as client:
+        response = client.post(url, json=payload)
+        response.raise_for_status()
+        print(response.json())
+
+
+if __name__ == "__main__":
+    main()
