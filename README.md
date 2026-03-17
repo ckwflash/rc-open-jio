@@ -140,6 +140,8 @@ Set Telegram webhook secret token to match `TELEGRAM_WEBHOOK_SECRET`.
 - `/created`
 - `/subscribe`
 
+`/profile` supports RC values: `Tembusu`, `CAPT`, `RC4`, `RVRC`, `NUSC`, `Acacia`, `UTR`.
+
 ### `/create` format
 `/create Title | CategoryKey | TargetAudience | YYYY-MM-DD HH:MM | Location | Capacity | Description`
 

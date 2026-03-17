@@ -5,7 +5,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.constants import CATEGORY_KEYS, category_label
+from app.constants import ALLOWED_RCS, CATEGORY_KEYS, category_label
 from app import repository
 from app.telegram_api import answer_callback_query, send_message
 
@@ -327,6 +327,7 @@ async def _handle_profile(chat_id: int, user_id: str, text: str) -> None:
                 f"Name: {profile['effective_display_name']}\n"
                 f"RC: {profile.get('rc_name') or '-'}\n\n"
                 f"Set format:\n/profile Preferred Name | RC Name\n"
+                f"Allowed RCs: {', '.join(ALLOWED_RCS)}\n"
                 f"Example:\n/profile Kaiwen | Tembusu"
             ),
         )
@@ -340,5 +341,9 @@ async def _handle_profile(chat_id: int, user_id: str, text: str) -> None:
     preferred_name, rc_name = parts
     preferred_name = preferred_name[:80]
     rc_name = rc_name[:80]
-    repository.set_profile(user_id, preferred_name or None, rc_name or None)
+    try:
+        repository.set_profile(user_id, preferred_name or None, rc_name or None)
+    except ValueError as ex:
+        await send_message(chat_id, str(ex))
+        return
     await send_message(chat_id, f"Profile updated. Name: {preferred_name or '-'} | RC: {rc_name or '-'}")
