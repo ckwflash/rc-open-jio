@@ -157,6 +157,9 @@ async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
         await send_message(chat_id, "Capacity must be a number.")
         return
 
+    if capacity == 0:
+        capacity = None
+
     event = repository.create_event(
         creator_user_id=user_id,
         title=title,
@@ -167,6 +170,7 @@ async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
         location_text=location_text,
         capacity=capacity,
     )
+
     await send_message(chat_id, f"Event created: {event['title']} ({event['id']})")
 
 
