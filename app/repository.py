@@ -494,4 +494,4 @@ def get_event_for_notification(event_id: str) -> dict[str, Any] | None:
 
 def format_dt(dt: datetime) -> str:
     tz = ZoneInfo(settings.default_timezone)
-    return dt.astimezone(tz).strftime("%d %b %Y, %I:%M %p %Z")
+    return dt.astimezone(tz).strftime("%d %b %Y, %I:%M %p")
