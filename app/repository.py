@@ -5,7 +5,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.constants import CATEGORY_KEYS
+from app.constants import ALLOWED_RCS_MAP, CATEGORY_KEYS
 from app.db import get_conn
 
 PAGE_SIZE = 8
@@ -113,7 +113,7 @@ def list_events(category: str | None = None, page: int = 0) -> list[dict[str, An
                 join users u on u.id = e.creator_user_id
                 left join event_participants ep on ep.event_id = e.id
                 where e.status = 'published' and e.start_at >= now() and e.category = %s
-                group by e.id, u.telegram_display_name, u.telegram_handle
+                group by e.id, u.custom_display_name, u.telegram_display_name, u.telegram_handle
                 order by e.start_at asc
                 limit %s offset %s
                 """,
@@ -131,7 +131,7 @@ def list_events(category: str | None = None, page: int = 0) -> list[dict[str, An
                 join users u on u.id = e.creator_user_id
                 left join event_participants ep on ep.event_id = e.id
                 where e.status = 'published' and e.start_at >= now()
-                group by e.id, u.telegram_display_name, u.telegram_handle
+                group by e.id, u.custom_display_name, u.telegram_display_name, u.telegram_handle
                 order by e.start_at asc
                 limit %s offset %s
                 """,
@@ -375,6 +375,13 @@ def subscribe_creator(subscriber_user_id: str, creator_user_id: str) -> None:
 
 
 def set_profile(user_id: str, custom_display_name: str | None, rc_name: str | None) -> dict[str, Any] | None:
+    normalized_rc: str | None = None
+    if rc_name:
+        rc_candidate = rc_name.strip().lower()
+        if rc_candidate not in ALLOWED_RCS_MAP:
+            raise ValueError("Invalid RC. Allowed: Tembusu, CAPT, RC4, RVRC")
+        normalized_rc = ALLOWED_RCS_MAP[rc_candidate]
+
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -385,7 +392,7 @@ def set_profile(user_id: str, custom_display_name: str | None, rc_name: str | No
             where id = %s
             returning *
             """,
-            (custom_display_name, rc_name, user_id),
+            (custom_display_name, normalized_rc, user_id),
         )
         row = cur.fetchone()
         conn.commit()
