@@ -12,5 +12,16 @@ CATEGORY_LABELS = {
     "other": "Other",
 }
 
-CATEGORY_KEYS = list(CATEGORY_LABELS.keys())
+CATEGORY_KEYS = [
+    "academic_study_skills",
+    "sports_fitness",
+    "wellness_mental_health",
+    "arts_culture",
+    "social_networking",
+    "other",
+]
 CATEGORY_NAME_TO_KEY = {v.lower(): k for k, v in CATEGORY_LABELS.items()}
+
+
+def category_label(key: str) -> str:
+    return CATEGORY_LABELS.get(key, key.replace("_", " ").title())

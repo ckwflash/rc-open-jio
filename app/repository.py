@@ -61,6 +61,16 @@ def create_event(
 
         cur.execute(
             """
+            insert into event_participants (event_id, user_id, status)
+            values (%s, %s, 'joined')
+            on conflict (event_id, user_id) do update set status = 'joined', joined_at = now()
+            """,
+            (event["id"], creator_user_id),
+        )
+        _rebuild_reminder_jobs(cur, event["id"], creator_user_id, start_at)
+
+        cur.execute(
+            """
             insert into notification_outbox (recipient_user_id, event_id, kind, payload, scheduled_for, dedupe_key)
             select
                 s.subscriber_user_id,
@@ -96,7 +106,7 @@ def list_events(category: str | None = None, page: int = 0) -> list[dict[str, An
                 """
                 select
                   e.*,
-                  u.telegram_display_name as creator_name,
+                                    coalesce(u.custom_display_name, u.telegram_display_name) as creator_name,
                   u.telegram_handle as creator_handle,
                   coalesce(sum(case when ep.status = 'joined' then 1 else 0 end), 0)::int as participant_count
                 from events e
@@ -114,7 +124,7 @@ def list_events(category: str | None = None, page: int = 0) -> list[dict[str, An
                 """
                 select
                   e.*,
-                  u.telegram_display_name as creator_name,
+                                    coalesce(u.custom_display_name, u.telegram_display_name) as creator_name,
                   u.telegram_handle as creator_handle,
                   coalesce(sum(case when ep.status = 'joined' then 1 else 0 end), 0)::int as participant_count
                 from events e
@@ -136,7 +146,7 @@ def get_event(event_id: str) -> dict[str, Any] | None:
             """
             select
               e.*,
-              u.telegram_display_name as creator_name,
+                            coalesce(u.custom_display_name, u.telegram_display_name) as creator_name,
               u.telegram_handle as creator_handle
             from events e
             join users u on u.id = e.creator_user_id
@@ -153,7 +163,7 @@ def get_event_participants(event_id: str) -> list[dict[str, Any]]:
             """
             select
               ep.user_id,
-              u.telegram_display_name,
+                            coalesce(u.custom_display_name, u.telegram_display_name) as display_name,
               u.telegram_handle,
               ep.joined_at
             from event_participants ep
@@ -362,6 +372,43 @@ def subscribe_creator(subscriber_user_id: str, creator_user_id: str) -> None:
             (subscriber_user_id, creator_user_id),
         )
         conn.commit()
+
+
+def set_profile(user_id: str, custom_display_name: str | None, rc_name: str | None) -> dict[str, Any] | None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            update users
+            set custom_display_name = %s,
+                rc_name = %s,
+                updated_at = now()
+            where id = %s
+            returning *
+            """,
+            (custom_display_name, rc_name, user_id),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return row
+
+
+def get_profile(user_id: str) -> dict[str, Any] | None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select
+              id,
+              telegram_display_name,
+              custom_display_name,
+              coalesce(custom_display_name, telegram_display_name) as effective_display_name,
+              rc_name,
+              telegram_handle
+            from users
+            where id = %s
+            """,
+            (user_id,),
+        )
+        return cur.fetchone()
 
 
 def claim_due_notifications(limit: int = 50, locker: str = "cron") -> list[dict[str, Any]]:

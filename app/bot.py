@@ -5,7 +5,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.constants import CATEGORY_KEYS, CATEGORY_LABELS
+from app.constants import CATEGORY_KEYS, category_label
 from app import repository
 from app.telegram_api import answer_callback_query, send_message
 
@@ -24,7 +24,7 @@ def handle_text_or_command(text: str) -> str:
 def category_buttons() -> list[list[dict[str, str]]]:
     rows: list[list[dict[str, str]]] = []
     for key in CATEGORY_KEYS:
-        rows.append([{ "text": CATEGORY_LABELS[key], "callback_data": f"cat:{key}:0" }])
+        rows.append([{ "text": category_label(key), "callback_data": f"cat:{key}:0" }])
     rows.append([{ "text": "View All", "callback_data": "cat:all:0" }])
     return rows
 
@@ -61,11 +61,16 @@ async def process_update(update: dict[str, Any]) -> None:
                 "/list - Browse events\n"
                 "/create - Create event (quick format)\n"
                 "/edit - Edit your event time/location\n"
+                "/profile - Set preferred name and RC\n"
                 "/joined - View joined events\n"
                 "/created - View created events\n"
                 "/subscribe - Subscribe to categories"
             ),
         )
+        return
+
+    if command.startswith("/profile"):
+        await _handle_profile(chat["id"], user["id"], text)
         return
 
     if command == "/list":
@@ -234,7 +239,7 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
         keyboard: list[list[dict[str, str]]] = []
         for event in rows:
             lines.append(
-                f"- {event['title']} | {CATEGORY_LABELS[event['category']]} | {repository.format_dt(event['start_at'])}"
+                f"- {event['title']} | {category_label(event['category'])} | {repository.format_dt(event['start_at'])}"
             )
             keyboard.append([{ "text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}" }])
 
@@ -259,15 +264,15 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
         for p in participants:
             if is_creator:
                 handle = f"@{p['telegram_handle']}" if p.get("telegram_handle") else "(no handle)"
-                participant_lines.append(f"- {p['telegram_display_name']} {handle}")
+                participant_lines.append(f"- {p['display_name']} {handle}")
             else:
-                participant_lines.append(f"- {p['telegram_display_name']}")
+                participant_lines.append(f"- {p['display_name']}")
 
         creator_handle = f"@{event['creator_handle']}" if event.get("creator_handle") else "(no handle)"
 
         text = (
             f"{event['title']}\n"
-            f"Category: {CATEGORY_LABELS[event['category']]}\n"
+            f"Category: {category_label(event['category'])}\n"
             f"Audience: {event['target_audience']}\n"
             f"Time: {repository.format_dt(event['start_at'])}\n"
             f"Location: {event['location_text']}\n"
@@ -280,7 +285,6 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
         keyboard = [
             [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
             [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
-            [{ "text": "Subscribe Creator", "callback_data": f"subu:{event['creator_user_id']}" }],
         ]
         await send_message(chat["id"], text, {"inline_keyboard": keyboard})
         return
@@ -296,14 +300,7 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
         category = data.split(":", 1)[1]
         repository.subscribe_category(user["id"], category)
         await answer_callback_query(query["id"], "Subscribed")
-        await send_message(chat["id"], f"Subscribed to {CATEGORY_LABELS[category]}")
-        return
-
-    if data.startswith("subu:"):
-        creator_user_id = data.split(":", 1)[1]
-        repository.subscribe_creator(user["id"], creator_user_id)
-        await answer_callback_query(query["id"], "Subscribed")
-        await send_message(chat["id"], "Subscribed to creator events")
+        await send_message(chat["id"], f"Subscribed to {category_label(category)}")
         return
 
     await answer_callback_query(query["id"])
@@ -312,5 +309,36 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
 def _subscription_buttons() -> list[list[dict[str, str]]]:
     rows: list[list[dict[str, str]]] = []
     for key in CATEGORY_KEYS:
-        rows.append([{ "text": CATEGORY_LABELS[key], "callback_data": f"subc:{key}" }])
+        rows.append([{ "text": category_label(key), "callback_data": f"subc:{key}" }])
     return rows
+
+
+async def _handle_profile(chat_id: int, user_id: str, text: str) -> None:
+    payload = text[len("/profile"):].strip()
+    if not payload:
+        profile = repository.get_profile(user_id)
+        if not profile:
+            await send_message(chat_id, "Profile not found.")
+            return
+        await send_message(
+            chat_id,
+            (
+                f"Current profile:\n"
+                f"Name: {profile['effective_display_name']}\n"
+                f"RC: {profile.get('rc_name') or '-'}\n\n"
+                f"Set format:\n/profile Preferred Name | RC Name\n"
+                f"Example:\n/profile Kaiwen | Tembusu"
+            ),
+        )
+        return
+
+    parts = [p.strip() for p in payload.split("|", 1)]
+    if len(parts) != 2:
+        await send_message(chat_id, "Use: /profile Preferred Name | RC Name")
+        return
+
+    preferred_name, rc_name = parts
+    preferred_name = preferred_name[:80]
+    rc_name = rc_name[:80]
+    repository.set_profile(user_id, preferred_name or None, rc_name or None)
+    await send_message(chat_id, f"Profile updated. Name: {preferred_name or '-'} | RC: {rc_name or '-'}")
