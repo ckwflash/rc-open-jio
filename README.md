@@ -15,8 +15,8 @@ Telegram bot MVP for NUS Residential Colleges to create and join student events.
 - View joined events
 - View created events
 - Edit created event schedule/location
+- Profile customization (preferred name + RC)
 - Subscribe to category
-- Subscribe to creator
 - Notification queue with reminders:
   - 24h + 1h before event
   - fallback to 1h only when event is <24h away
@@ -31,14 +31,9 @@ Telegram bot MVP for NUS Residential Colleges to create and join student events.
 
 ## Categories (fixed)
 - academic_study_skills
-- career_internships
 - wellness_mental_health
 - sports_fitness
 - arts_culture
-- community_service_volunteering
-- entrepreneurship_hackathons
-- residential_college_life
-- admin_deadlines
 - social_networking
 - other
 
@@ -140,9 +135,12 @@ Set Telegram webhook secret token to match `TELEGRAM_WEBHOOK_SECRET`.
 - `/list`
 - `/create`
 - `/edit`
+- `/profile`
 - `/joined`
 - `/created`
 - `/subscribe`
+
+`/profile` supports RC values: `Tembusu`, `CAPT`, `RC4`, `RVRC`, `NUSC`, `Acacia`, `UTR`.
 
 ### `/create` format
 `/create Title | CategoryKey | TargetAudience | YYYY-MM-DD HH:MM | Location | Capacity | Description`

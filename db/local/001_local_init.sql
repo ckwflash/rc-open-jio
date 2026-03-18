@@ -74,6 +74,8 @@ create table users (
   telegram_user_id bigint not null unique,
   telegram_handle text,
   telegram_display_name text not null,
+  custom_display_name text,
+  rc_name text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
