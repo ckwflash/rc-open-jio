@@ -28,6 +28,23 @@ def main() -> None:
         response.raise_for_status()
         print(response.json())
 
+        commands_url = f"https://api.telegram.org/bot{token}/setMyCommands"
+        commands_payload = {
+            "commands": [
+                {"command": "start", "description": "Start bot"},
+                {"command": "menu", "description": "Show menu"},
+                {"command": "list", "description": "Browse events"},
+                {"command": "create", "description": "Create event"},
+                {"command": "edit", "description": "Edit created event"},
+                {"command": "joined", "description": "View joined events"},
+                {"command": "created", "description": "View created events"},
+                {"command": "subscribe", "description": "Subscribe categories"},
+            ]
+        }
+        commands_response = client.post(commands_url, json=commands_payload)
+        commands_response.raise_for_status()
+        print(commands_response.json())
+
 
 if __name__ == "__main__":
     main()

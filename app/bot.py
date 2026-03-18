@@ -5,9 +5,85 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.constants import CATEGORY_KEYS, CATEGORY_LABELS
+from app.constants import CATEGORY_KEYS, CATEGORY_LABELS, CATEGORY_NAME_TO_KEY
 from app import repository
 from app.telegram_api import answer_callback_query, send_message
+
+
+MAIN_MENU_TEXT = (
+    "Welcome to RC Open Jio.\n"
+    "Tap an option below to continue."
+)
+
+MAIN_MENU_KEYBOARD = {
+    "keyboard": [
+        [{"text": "Browse events"}, {"text": "Create event"}],
+        [{"text": "My joined events"}, {"text": "My created events"}],
+        [{"text": "Edit my event"}, {"text": "Subscribe categories"}],
+        [{"text": "Show main menu"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+LIST_FLOW_KEYBOARD = {
+    "keyboard": [
+        [{"text": "Browse events"}, {"text": "Subscribe categories"}],
+        [{"text": "Show main menu"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+CREATED_FLOW_KEYBOARD = {
+    "keyboard": [
+        [{"text": "Create event"}, {"text": "Edit my event"}],
+        [{"text": "My created events"}, {"text": "Show main menu"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+BUTTON_TO_COMMAND = {
+    "browse events": "/list",
+    "create event": "/create",
+    "my joined events": "/joined",
+    "my created events": "/created",
+    "edit my event": "/edit",
+    "subscribe categories": "/subscribe",
+    "show main menu": "/menu",
+}
+
+CREATE_FLOWS: dict[str, dict[str, Any]] = {}
+EDIT_FLOWS: dict[str, dict[str, Any]] = {}
+
+FLOW_ACTIONS_KEYBOARD = {
+    "keyboard": [
+        [{"text": "Cancel action"}, {"text": "Show main menu"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+
+def _build_category_picker_keyboard() -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    labels = list(CATEGORY_LABELS.values())
+    for i in range(0, len(labels), 2):
+        row: list[dict[str, str]] = [{"text": labels[i]}]
+        if i + 1 < len(labels):
+            row.append({"text": labels[i + 1]})
+        rows.append(row)
+
+    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    return {
+        "keyboard": rows,
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+CATEGORY_PICKER_KEYBOARD = _build_category_picker_keyboard()
 
 
 def display_name(user: dict[str, Any]) -> str:
@@ -18,7 +94,12 @@ def display_name(user: dict[str, Any]) -> str:
 
 
 def handle_text_or_command(text: str) -> str:
-    return text.strip().split("@")[0].lower()
+    normalized = text.strip().lower()
+    if normalized in BUTTON_TO_COMMAND:
+        return BUTTON_TO_COMMAND[normalized]
+    if normalized.startswith("/"):
+        return normalized.split(maxsplit=1)[0].split("@")[0]
+    return normalized
 
 
 def category_buttons() -> list[list[dict[str, str]]]:
@@ -50,22 +131,34 @@ async def process_update(update: dict[str, Any]) -> None:
         display_name=display_name(from_user),
     )
 
-    command = handle_text_or_command(text)
+    raw_text = text.strip()
+    command = handle_text_or_command(raw_text)
+    user_id = user["id"]
 
     if command in {"/start", "/menu", "/help"}:
-        await send_message(
-            chat["id"],
-            (
-                "Welcome to RC Open Jio.\n\n"
-                "Commands:\n"
-                "/list - Browse events\n"
-                "/create - Create event (quick format)\n"
-                "/edit - Edit your event time/location\n"
-                "/joined - View joined events\n"
-                "/created - View created events\n"
-                "/subscribe - Subscribe to categories"
-            ),
-        )
+        _clear_user_flow(user_id)
+        await send_message(chat["id"], MAIN_MENU_TEXT, MAIN_MENU_KEYBOARD)
+        return
+
+    if command in {"cancel action", "cancel"}:
+        _clear_user_flow(user_id)
+        await send_message(chat["id"], "Action cancelled.", MAIN_MENU_KEYBOARD)
+        return
+
+    if command == "/create":
+        await _start_create_flow(chat["id"], user_id)
+        return
+
+    if command == "/edit":
+        await _start_edit_flow(chat["id"], user_id)
+        return
+
+    if user_id in CREATE_FLOWS:
+        await _continue_create_flow(chat["id"], user_id, raw_text)
+        return
+
+    if user_id in EDIT_FLOWS:
+        await _continue_edit_flow(chat["id"], user_id, raw_text)
         return
 
     if command == "/list":
@@ -74,6 +167,7 @@ async def process_update(update: dict[str, Any]) -> None:
             "Choose a category:",
             {"inline_keyboard": category_buttons()},
         )
+        await send_message(chat["id"], "You can continue from the options below too.", LIST_FLOW_KEYBOARD)
         return
 
     if command.startswith("/subscribe"):
@@ -82,41 +176,41 @@ async def process_update(update: dict[str, Any]) -> None:
             "Choose a category to subscribe:",
             {"inline_keyboard": _subscription_buttons()},
         )
+        await send_message(chat["id"], "Subscription options are shown above.", LIST_FLOW_KEYBOARD)
         return
 
     if command.startswith("/joined"):
         rows = repository.list_joined_events(user["id"])
         if not rows:
-            await send_message(chat["id"], "You have not joined any events yet.")
+            await send_message(chat["id"], "You have not joined any events yet.", MAIN_MENU_KEYBOARD)
             return
         lines = ["Your joined events:"]
         for event in rows:
             lines.append(f"- {event['title']} ({repository.format_dt(event['start_at'])})")
-        await send_message(chat["id"], "\n".join(lines))
+        await send_message(chat["id"], "\n".join(lines), MAIN_MENU_KEYBOARD)
         return
 
     if command.startswith("/created"):
         rows = repository.list_created_events(user["id"])
         if not rows:
-            await send_message(chat["id"], "You have not created any events yet.")
+            await send_message(chat["id"], "You have not created any events yet.", CREATED_FLOW_KEYBOARD)
             return
         lines = ["Your created events:"]
         for event in rows:
             lines.append(f"- {event['title']} ({repository.format_dt(event['start_at'])}) | ID: {event['id']}")
-        lines.append("\nEdit format:")
-        lines.append("/edit EventID | YYYY-MM-DD HH:MM | New Location")
-        await send_message(chat["id"], "\n".join(lines))
+        lines.append("\nTap 'Edit my event' below to update one.")
+        await send_message(chat["id"], "\n".join(lines), CREATED_FLOW_KEYBOARD)
         return
 
-    if command.startswith("/edit"):
+    if command.startswith("/edit") and command != "/edit":
         await _handle_edit(chat["id"], user["id"], text)
         return
 
-    if command.startswith("/create"):
+    if command.startswith("/create") and command != "/create":
         await _handle_create(chat["id"], user["id"], text)
         return
 
-    await send_message(chat["id"], "Use /menu to get started.")
+    await send_message(chat["id"], "Use /menu to get started.", MAIN_MENU_KEYBOARD)
 
 
 async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
@@ -130,17 +224,18 @@ async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
                 "Example:\n"
                 "/create Badminton @ USC | sports_fitness | all_rc | 2026-03-20 19:30 | USC Hall | 12 | Casual doubles play"
             ),
+            CREATED_FLOW_KEYBOARD,
         )
         return
 
     parts = [p.strip() for p in payload.split("|")]
     if len(parts) != 7:
-        await send_message(chat_id, "Invalid format. Please use /create with 7 fields.")
+        await send_message(chat_id, "Invalid format. Please use /create with 7 fields.", CREATED_FLOW_KEYBOARD)
         return
 
     title, category, target_audience, dt_str, location_text, cap_str, description = parts
     if category not in CATEGORY_KEYS:
-        await send_message(chat_id, f"Invalid category key: {category}")
+        await send_message(chat_id, f"Invalid category key: {category}", CREATED_FLOW_KEYBOARD)
         return
 
     try:
@@ -148,13 +243,13 @@ async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
         local_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
         start_at = local_dt.astimezone(UTC)
     except ValueError:
-        await send_message(chat_id, "Invalid datetime format. Use YYYY-MM-DD HH:MM")
+        await send_message(chat_id, "Invalid datetime format. Use YYYY-MM-DD HH:MM", CREATED_FLOW_KEYBOARD)
         return
 
     try:
         capacity = int(cap_str) if cap_str else None
     except ValueError:
-        await send_message(chat_id, "Capacity must be a number.")
+        await send_message(chat_id, "Capacity must be a number.", CREATED_FLOW_KEYBOARD)
         return
 
     event = repository.create_event(
@@ -167,18 +262,18 @@ async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
         location_text=location_text,
         capacity=capacity,
     )
-    await send_message(chat_id, f"Event created: {event['title']} ({event['id']})")
+    await send_message(chat_id, f"Event created: {event['title']} ({event['id']})", CREATED_FLOW_KEYBOARD)
 
 
 async def _handle_edit(chat_id: int, user_id: str, text: str) -> None:
     payload = text[len("/edit"):].strip()
     if not payload:
-        await send_message(chat_id, "Format: /edit EventID | YYYY-MM-DD HH:MM | New Location")
+        await send_message(chat_id, "Format: /edit EventID | YYYY-MM-DD HH:MM | New Location", CREATED_FLOW_KEYBOARD)
         return
 
     parts = [p.strip() for p in payload.split("|")]
     if len(parts) != 3:
-        await send_message(chat_id, "Invalid format. Use: /edit EventID | YYYY-MM-DD HH:MM | New Location")
+        await send_message(chat_id, "Invalid format. Use: /edit EventID | YYYY-MM-DD HH:MM | New Location", CREATED_FLOW_KEYBOARD)
         return
 
     event_id, dt_str, new_location = parts
@@ -188,7 +283,7 @@ async def _handle_edit(chat_id: int, user_id: str, text: str) -> None:
         local_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
         start_at = local_dt.astimezone(UTC)
     except ValueError:
-        await send_message(chat_id, "Invalid datetime format. Use YYYY-MM-DD HH:MM")
+        await send_message(chat_id, "Invalid datetime format. Use YYYY-MM-DD HH:MM", CREATED_FLOW_KEYBOARD)
         return
 
     ok, msg = repository.edit_event_schedule_location(
@@ -197,7 +292,184 @@ async def _handle_edit(chat_id: int, user_id: str, text: str) -> None:
         start_at=start_at,
         location_text=new_location,
     )
-    await send_message(chat_id, msg if ok else f"Unable to edit event: {msg}")
+    await send_message(chat_id, msg if ok else f"Unable to edit event: {msg}", CREATED_FLOW_KEYBOARD)
+
+
+def _clear_user_flow(user_id: str) -> None:
+    CREATE_FLOWS.pop(user_id, None)
+    EDIT_FLOWS.pop(user_id, None)
+
+
+async def _start_create_flow(chat_id: int, user_id: str) -> None:
+    CREATE_FLOWS[user_id] = {"step": "title", "data": {}}
+    await send_message(chat_id, "Creating event (1/7): Enter event title.", FLOW_ACTIONS_KEYBOARD)
+
+
+async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
+    state = CREATE_FLOWS.get(user_id)
+    if not state:
+        return
+
+    value = text.strip()
+    if not value:
+        await send_message(chat_id, "Please enter a value.", FLOW_ACTIONS_KEYBOARD)
+        return
+
+    data = state["data"]
+    step = state["step"]
+
+    if step == "title":
+        data["title"] = value
+        state["step"] = "category"
+        await send_message(
+            chat_id,
+            "Creating event (2/7): Pick a category from the options below.",
+            CATEGORY_PICKER_KEYBOARD,
+        )
+        return
+
+    if step == "category":
+        key = CATEGORY_NAME_TO_KEY.get(value.lower(), value.lower())
+        if key not in CATEGORY_KEYS:
+            await send_message(chat_id, "Invalid category. Please tap one from the keyboard.", CATEGORY_PICKER_KEYBOARD)
+            return
+        data["category"] = key
+        state["step"] = "target_audience"
+        await send_message(
+            chat_id,
+            "Creating event (3/7): Enter target audience (e.g. all_rc, rc4_only, everyone).",
+            FLOW_ACTIONS_KEYBOARD,
+        )
+        return
+
+    if step == "target_audience":
+        data["target_audience"] = value
+        state["step"] = "start_at"
+        await send_message(
+            chat_id,
+            f"Creating event (4/7): Enter start date/time in {settings.default_timezone} as YYYY-MM-DD HH:MM",
+            FLOW_ACTIONS_KEYBOARD,
+        )
+        return
+
+    if step == "start_at":
+        try:
+            local_tz = ZoneInfo(settings.default_timezone)
+            local_dt = datetime.strptime(value, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
+            data["start_at"] = local_dt.astimezone(UTC)
+        except ValueError:
+            await send_message(chat_id, "Invalid datetime format. Use YYYY-MM-DD HH:MM", FLOW_ACTIONS_KEYBOARD)
+            return
+        state["step"] = "location"
+        await send_message(chat_id, "Creating event (5/7): Enter location.", FLOW_ACTIONS_KEYBOARD)
+        return
+
+    if step == "location":
+        data["location_text"] = value
+        state["step"] = "capacity"
+        await send_message(
+            chat_id,
+            "Creating event (6/7): Enter capacity number, or type 'none' for no limit.",
+            FLOW_ACTIONS_KEYBOARD,
+        )
+        return
+
+    if step == "capacity":
+        lower = value.lower()
+        if lower in {"none", "no limit", "skip", "unlimited"}:
+            data["capacity"] = None
+        else:
+            try:
+                capacity = int(value)
+                if capacity <= 0:
+                    raise ValueError
+                data["capacity"] = capacity
+            except ValueError:
+                await send_message(chat_id, "Capacity must be a positive number, or 'none'.", FLOW_ACTIONS_KEYBOARD)
+                return
+        state["step"] = "description"
+        await send_message(chat_id, "Creating event (7/7): Enter description.", FLOW_ACTIONS_KEYBOARD)
+        return
+
+    if step == "description":
+        data["description"] = value
+        event = repository.create_event(
+            creator_user_id=user_id,
+            title=data["title"],
+            description=data["description"],
+            category=data["category"],
+            target_audience=data["target_audience"],
+            start_at=data["start_at"],
+            location_text=data["location_text"],
+            capacity=data["capacity"],
+        )
+        CREATE_FLOWS.pop(user_id, None)
+        await send_message(chat_id, f"Event created: {event['title']} ({event['id']})", CREATED_FLOW_KEYBOARD)
+
+
+async def _start_edit_flow(chat_id: int, user_id: str) -> None:
+    rows = repository.list_created_events(user_id)
+    if not rows:
+        await send_message(chat_id, "You have not created any events yet.", CREATED_FLOW_KEYBOARD)
+        return
+
+    valid_ids = {str(row["id"]) for row in rows}
+    lines = ["Editing event. Step 1/3: Enter Event ID from your list:"]
+    for row in rows:
+        lines.append(f"- {row['title']} | ID: {str(row['id'])}")
+
+    EDIT_FLOWS[user_id] = {"step": "event_id", "data": {}, "valid_ids": valid_ids}
+    await send_message(chat_id, "\n".join(lines), FLOW_ACTIONS_KEYBOARD)
+
+
+async def _continue_edit_flow(chat_id: int, user_id: str, text: str) -> None:
+    state = EDIT_FLOWS.get(user_id)
+    if not state:
+        return
+
+    value = text.strip()
+    if not value:
+        await send_message(chat_id, "Please enter a value.", FLOW_ACTIONS_KEYBOARD)
+        return
+
+    data = state["data"]
+    step = state["step"]
+
+    if step == "event_id":
+        if value not in state["valid_ids"]:
+            await send_message(chat_id, "Invalid Event ID. Paste one from the list above.", FLOW_ACTIONS_KEYBOARD)
+            return
+        data["event_id"] = value
+        state["step"] = "start_at"
+        await send_message(
+            chat_id,
+            f"Editing event (2/3): Enter new date/time in {settings.default_timezone} as YYYY-MM-DD HH:MM",
+            FLOW_ACTIONS_KEYBOARD,
+        )
+        return
+
+    if step == "start_at":
+        try:
+            local_tz = ZoneInfo(settings.default_timezone)
+            local_dt = datetime.strptime(value, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
+            data["start_at"] = local_dt.astimezone(UTC)
+        except ValueError:
+            await send_message(chat_id, "Invalid datetime format. Use YYYY-MM-DD HH:MM", FLOW_ACTIONS_KEYBOARD)
+            return
+        state["step"] = "location"
+        await send_message(chat_id, "Editing event (3/3): Enter new location.", FLOW_ACTIONS_KEYBOARD)
+        return
+
+    if step == "location":
+        data["location_text"] = value
+        ok, msg = repository.edit_event_schedule_location(
+            creator_user_id=user_id,
+            event_id=data["event_id"],
+            start_at=data["start_at"],
+            location_text=data["location_text"],
+        )
+        EDIT_FLOWS.pop(user_id, None)
+        await send_message(chat_id, msg if ok else f"Unable to edit event: {msg}", CREATED_FLOW_KEYBOARD)
 
 
 async def _handle_callback_query(query: dict[str, Any]) -> None:
