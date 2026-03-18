@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.constants import ALLOWED_RCS, CATEGORY_KEYS, category_label
 from app import repository
-from app.telegram_api import answer_callback_query, send_message
+from app.telegram_api import answer_callback_query, send_message, edit_message_text
 
 
 def display_name(user: dict[str, Any]) -> str:
@@ -291,9 +291,66 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
 
     if data.startswith("jn:"):
         event_id = data.split(":", 1)[1]
+        
+        # Get the original message from the callback query
+        original_message = query.get("message", {})
+        message_id = original_message.get("message_id")
+        chat_id = original_message.get("chat", {}).get("id")
+    
+        
+        # Join the event
         ok, msg = repository.join_event(event_id, user["id"])
-        await answer_callback_query(query["id"], "Joined" if ok else "Failed")
-        await send_message(chat["id"], msg)
+        
+        if ok:
+            # Get updated event details
+            event = repository.get_event(event_id)
+            participants = repository.get_event_participants(event_id)
+            is_creator = event["creator_user_id"] == user["id"]
+            
+            # Rebuild the participant lines (same as in evt: handler)
+            participant_lines = []
+            for p in participants:
+                if is_creator:
+                    handle = f"@{p['telegram_handle']}" if p.get("telegram_handle") else "(no handle)"
+                    participant_lines.append(f"- {p['display_name']} {handle}")
+                else:
+                    participant_lines.append(f"- {p['display_name']}")
+            
+            creator_handle = f"@{event['creator_handle']}" if event.get("creator_handle") else "(no handle)"
+            
+            # Build the updated text (THIS IS THE updated_text VARIABLE)
+            updated_text = (
+                f"{event['title']}\n"
+                f"Category: {category_label(event['category'])}\n"
+                f"Audience: {event['target_audience']}\n"
+                f"Time: {repository.format_dt(event['start_at'])}\n"
+                f"Location: {event['location_text']}\n"
+                f"Creator: {event['creator_name']} {creator_handle}\n"
+                f"Description: {event['description']}\n\n"
+                f"Participants ({len(participants)}):\n"
+                + ("\n".join(participant_lines) if participant_lines else "- No participants yet")
+            )
+            
+            # Rebuild the keyboard (same buttons as before)
+            keyboard = [
+                [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
+                [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
+            ]
+            
+            # EDIT the original message
+            await edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=updated_text,
+                reply_markup={"inline_keyboard": keyboard}
+            )
+            
+            # Show a brief popup that they joined
+            await answer_callback_query(query["id"], "✅ Joined!")
+        else:
+            print(f"Join failed: {msg}")
+            await answer_callback_query(query["id"], "❌ Failed to join")
+            await send_message(chat["id"], msg)
         return
 
     if data.startswith("subc:"):

@@ -9,7 +9,7 @@ from app.config import settings
 BASE_URL = f"https://api.telegram.org/bot{settings.bot_token}"
 
 
-async def send_message(chat_id: int, text: str, reply_markup: dict[str, Any] | None = None) -> None:
+async def send_message(chat_id: int, text: str, reply_markup: dict[str, Any] | None = None) -> dict[str, Any] | None:
     payload: dict[str, Any] = {
         "chat_id": chat_id,
         "text": text,
@@ -19,7 +19,10 @@ async def send_message(chat_id: int, text: str, reply_markup: dict[str, Any] | N
         payload["reply_markup"] = reply_markup
 
     async with httpx.AsyncClient(timeout=10) as client:
-        await client.post(f"{BASE_URL}/sendMessage", json=payload)
+        response = await client.post(f"{BASE_URL}/sendMessage", json=payload)
+        if response.status_code == 200:
+            return response.json().get("result")
+        return None
 
 
 async def answer_callback_query(callback_query_id: str, text: str | None = None) -> None:
@@ -31,3 +34,18 @@ async def answer_callback_query(callback_query_id: str, text: str | None = None)
 
     async with httpx.AsyncClient(timeout=10) as client:
         await client.post(f"{BASE_URL}/answerCallbackQuery", json=payload)
+
+
+async def edit_message_text(chat_id: int, message_id: int, text: str, reply_markup: dict[str, Any] | None = None) -> None:
+    """Edit an existing message instead of sending a new one"""
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        await client.post(f"{BASE_URL}/editMessageText", json=payload)

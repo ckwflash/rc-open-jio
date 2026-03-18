@@ -34,3 +34,9 @@ async def telegram_webhook(
     except Exception:  # noqa: BLE001
         logger.exception("Failed to process Telegram update")
     return {"ok": True}
+
+@app.post("/api/webhook")
+async def webhook(request: Request):
+    update = await request.json()
+    await process_update(update)
+    return {"ok": True}
