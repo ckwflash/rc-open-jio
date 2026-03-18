@@ -142,6 +142,15 @@ def _build_subscribe_category_keyboard() -> dict[str, Any]:
 
 SUBSCRIBE_CATEGORY_KEYBOARD = _build_subscribe_category_keyboard()
 
+SUBSCRIBE_MENU_KEYBOARD = {
+    "keyboard": [
+        [{"text": "Subscribe category"}, {"text": "Remove subscription"}],
+        [{"text": "Browse events"}, {"text": "Show main menu"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
 
 def _build_rc_picker_keyboard() -> dict[str, Any]:
     rows: list[list[dict[str, str]]] = []
@@ -526,20 +535,85 @@ async def _continue_profile_flow(chat_id: int, user_id: str, text: str) -> None:
 
 
 async def _start_subscribe_flow(chat_id: int, user_id: str) -> None:
-    SUBSCRIBE_FLOWS[user_id] = {"step": "category"}
-    await send_message(chat_id, "Choose a category to subscribe:", SUBSCRIBE_CATEGORY_KEYBOARD)
+    categories = repository.list_category_subscriptions(user_id)
+    lines = ["Your subscribed categories:"]
+    if categories:
+        for key in categories:
+            lines.append(f"- {category_label(key)}")
+    else:
+        lines.append("- (none)")
+
+    lines.append("\nChoose an action below.")
+    SUBSCRIBE_FLOWS[user_id] = {"step": "menu"}
+    await send_message(chat_id, "\n".join(lines), SUBSCRIBE_MENU_KEYBOARD)
 
 
 async def _continue_subscribe_flow(chat_id: int, user_id: str, text: str) -> None:
     value = text.strip()
+    state = SUBSCRIBE_FLOWS.get(user_id)
+    if not state:
+        return
+
+    step = state.get("step")
+
+    if step == "menu":
+        lower = value.lower()
+        if lower == "subscribe category":
+            state["step"] = "subscribe_pick"
+            await send_message(chat_id, "Pick a category to subscribe:", SUBSCRIBE_CATEGORY_KEYBOARD)
+            return
+        if lower == "remove subscription":
+            categories = repository.list_category_subscriptions(user_id)
+            if not categories:
+                await send_message(chat_id, "You do not have any category subscriptions yet.", SUBSCRIBE_MENU_KEYBOARD)
+                return
+
+            rows: list[list[dict[str, str]]] = []
+            labels = [category_label(key) for key in categories]
+            for i in range(0, len(labels), 2):
+                row: list[dict[str, str]] = [{"text": labels[i]}]
+                if i + 1 < len(labels):
+                    row.append({"text": labels[i + 1]})
+                rows.append(row)
+            rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+            state["step"] = "remove_pick"
+            state["removable_categories"] = categories
+            await send_message(
+                chat_id,
+                "Pick a category to remove:",
+                {"keyboard": rows, "resize_keyboard": True, "is_persistent": True},
+            )
+            return
+
+        await send_message(chat_id, "Choose one action from the keyboard.", SUBSCRIBE_MENU_KEYBOARD)
+        return
+
     key = CATEGORY_NAME_TO_KEY.get(value.lower())
     if not key or key not in CATEGORY_KEYS:
         await send_message(chat_id, "Please pick a category from the keyboard.", SUBSCRIBE_CATEGORY_KEYBOARD)
         return
 
-    repository.subscribe_category(user_id, key)
+    if step == "subscribe_pick":
+        repository.subscribe_category(user_id, key)
+        await send_message(chat_id, f"Subscribed to {category_label(key)}")
+        await _start_subscribe_flow(chat_id, user_id)
+        return
+
+    if step == "remove_pick":
+        removable = set(state.get("removable_categories") or [])
+        if key not in removable:
+            await send_message(chat_id, "Please pick one of your subscribed categories.")
+            return
+        removed = repository.remove_category_subscription(user_id, key)
+        if removed:
+            await send_message(chat_id, f"Removed subscription: {category_label(key)}")
+        else:
+            await send_message(chat_id, "Subscription was already removed.")
+        await _start_subscribe_flow(chat_id, user_id)
+        return
+
+    await send_message(chat_id, "Subscription action ended.", LIST_FLOW_KEYBOARD)
     SUBSCRIBE_FLOWS.pop(user_id, None)
-    await send_message(chat_id, f"Subscribed to {category_label(key)}", LIST_FLOW_KEYBOARD)
 
 
 async def _start_create_flow(chat_id: int, user_id: str) -> None:

@@ -424,6 +424,38 @@ def subscribe_category(subscriber_user_id: str, category: str) -> None:
         conn.commit()
 
 
+def list_category_subscriptions(subscriber_user_id: str) -> list[str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select category::text as category
+            from event_subscriptions
+            where subscriber_user_id = %s
+              and kind = 'category'
+            order by category::text asc
+            """,
+            (subscriber_user_id,),
+        )
+        rows = cur.fetchall()
+        return [row["category"] for row in rows]
+
+
+def remove_category_subscription(subscriber_user_id: str, category: str) -> bool:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            delete from event_subscriptions
+            where subscriber_user_id = %s
+              and kind = 'category'
+              and category = %s::event_category
+            """,
+            (subscriber_user_id, category),
+        )
+        deleted = cur.rowcount > 0
+        conn.commit()
+        return deleted
+
+
 def list_category_subscription_recipients(
     category: str,
     target_audience: str,
