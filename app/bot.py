@@ -912,6 +912,9 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
             return
 
         participants = repository.get_event_participants(event_id)
+        participant_ids = [p['user_id'] for p in participants]
+        has_joined = user['id'] in participant_ids
+
         is_creator = event["creator_user_id"] == user["id"]
 
         participant_lines = []
@@ -936,10 +939,18 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
             + ("\n".join(participant_lines) if participant_lines else "- No participants yet")
         )
 
-        keyboard = [
-            [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
-            [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
-        ]
+        if has_joined:
+            keyboard = [
+                [{ "text": "Leave Event", "callback_data": f"leave:{event['id']}" }],
+                [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
+            
+            ]
+        else:
+            keyboard = [
+                [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
+                [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
+            ]
+
         await send_message(chat["id"], text, {"inline_keyboard": keyboard})
         return
 
@@ -950,7 +961,6 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
         original_message = query.get("message", {})
         message_id = original_message.get("message_id")
         chat_id = original_message.get("chat", {}).get("id")
-    
         
         # Join the event
         ok, msg = repository.join_event(event_id, user["id"])
@@ -961,7 +971,11 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
             participants = repository.get_event_participants(event_id)
             is_creator = event["creator_user_id"] == user["id"]
             
-            # Rebuild the participant lines (same as in evt: handler)
+            # Check if current user is in participants
+            participant_ids = [p['user_id'] for p in participants]
+            has_joined = user['id'] in participant_ids
+            
+            # Rebuild the participant lines
             participant_lines = []
             for p in participants:
                 if is_creator:
@@ -972,7 +986,7 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
             
             creator_handle = f"@{event['creator_handle']}" if event.get("creator_handle") else "(no handle)"
             
-            # Build the updated text (THIS IS THE updated_text VARIABLE)
+            # Build the updated text
             updated_text = (
                 f"{event['title']}\n"
                 f"Category: {category_label(event['category'])}\n"
@@ -985,11 +999,19 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
                 + ("\n".join(participant_lines) if participant_lines else "- No participants yet")
             )
             
-            # Rebuild the keyboard (same buttons as before)
-            keyboard = [
-                [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
-                [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
-            ]
+            # Build keyboard based on join status
+            if has_joined:
+                # User just joined, so show Leave button
+                keyboard = [
+                    [{ "text": "Leave Event", "callback_data": f"leave:{event['id']}" }],
+                    [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
+                ]
+            else:
+                # Shouldn't happen since we just joined, but just in case
+                keyboard = [
+                    [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
+                    [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
+                ]
             
             # EDIT the original message
             await edit_message_text(
@@ -1002,7 +1024,6 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
             # Show a brief popup that they joined
             await answer_callback_query(query["id"], "✅ Joined!")
         else:
-            print(f"Join failed: {msg}")
             await answer_callback_query(query["id"], "❌ Failed to join")
             await send_message(chat["id"], msg)
         return
@@ -1018,6 +1039,67 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
         await send_message(chat["id"], f"Subscribed to {category_label(category)}")
         return
 
+    if data.startswith("leave:"):
+        event_id = data.split(":", 1)[1]
+        
+        # Get the original message
+        original_message = query.get("message", {})
+        message_id = original_message.get("message_id")
+        chat_id = original_message.get("chat", {}).get("id")
+        
+        # Leave the event
+        ok, msg = repository.leave_event(event_id, user["id"])
+        
+        if ok:
+            # Get updated event details
+            event = repository.get_event(event_id)
+            participants = repository.get_event_participants(event_id)
+            is_creator = event["creator_user_id"] == user["id"]
+            
+            # Rebuild participant lines
+            participant_lines = []
+            for p in participants:
+                if is_creator:
+                    handle = f"@{p['telegram_handle']}" if p.get("telegram_handle") else "(no handle)"
+                    participant_lines.append(f"- {p['display_name']} {handle}")
+                else:
+                    participant_lines.append(f"- {p['display_name']}")
+            
+            creator_handle = f"@{event['creator_handle']}" if event.get("creator_handle") else "(no handle)"
+            
+            # Build updated text
+            updated_text = (
+                f"{event['title']}\n"
+                f"Category: {category_label(event['category'])}\n"
+                f"Audience: {event['target_audience']}\n"
+                f"Time: {repository.format_dt(event['start_at'])}\n"
+                f"Location: {event['location_text']}\n"
+                f"Creator: {event['creator_name']} {creator_handle}\n"
+                f"Description: {event['description']}\n\n"
+                f"Participants ({len(participants)}):\n"
+                + ("\n".join(participant_lines) if participant_lines else "- No participants yet")
+            )
+            
+            # Now user hasn't joined, so show Join button
+            keyboard = [
+                [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
+                [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
+            ]
+            
+            # Edit the message
+            await edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=updated_text,
+                reply_markup={"inline_keyboard": keyboard}
+            )
+            
+            await answer_callback_query(query["id"], "✅ Left event!")
+        else:
+            await answer_callback_query(query["id"], "❌ Failed to leave")
+            await send_message(chat["id"], msg)
+        return
+    
     await answer_callback_query(query["id"])
 
 

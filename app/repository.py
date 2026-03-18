@@ -615,3 +615,43 @@ def get_event_for_notification(event_id: str) -> dict[str, Any] | None:
 def format_dt(dt: datetime) -> str:
     tz = ZoneInfo(settings.default_timezone)
     return dt.astimezone(tz).strftime("%d %b %Y, %I:%M %p")
+
+def leave_event(event_id: str, user_id: str) -> tuple[bool, str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        # Check if event exists
+        cur.execute("select * from events where id = %s and status = 'published'", (event_id,))
+        event = cur.fetchone()
+        if not event:
+            conn.rollback()
+            return False, "Event not found."
+        
+        # Check if user is the creator (can't leave if you're the creator)
+        if event["creator_user_id"] == user_id:
+            conn.rollback()
+            return False, "You cannot leave an event you created. You can delete it instead."
+        
+        # Remove user from participants
+        cur.execute(
+            "delete from event_participants where event_id = %s and user_id = %s",
+            (event_id, user_id),
+        )
+        
+        # Check if anything was deleted
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False, "You are not a participant of this event."
+        
+        # Update reminder jobs (remove reminders for this user)
+        cur.execute(
+            """
+            delete from notification_outbox
+            where event_id = %s
+              and recipient_user_id = %s
+              and kind in ('reminder_24h', 'reminder_1h')
+              and status in ('pending', 'processing')
+            """,
+            (event_id, user_id),
+        )
+        
+        conn.commit()
+        return True, "You have left this event."
