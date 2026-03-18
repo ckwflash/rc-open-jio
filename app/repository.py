@@ -98,7 +98,7 @@ def create_event(
         return event
 
 
-def list_events(category: str | None = None, page: int = 0) -> list[dict[str, Any]]:
+def list_events(category: str | None = None, page: int = 0, viewer_rc: str | None = None) -> list[dict[str, Any]]:
     offset = page * PAGE_SIZE
     with get_conn() as conn, conn.cursor() as cur:
         if category and category in CATEGORY_KEYS:
@@ -112,12 +112,18 @@ def list_events(category: str | None = None, page: int = 0) -> list[dict[str, An
                 from events e
                 join users u on u.id = e.creator_user_id
                 left join event_participants ep on ep.event_id = e.id
-                where e.status = 'published' and e.start_at >= now() and e.category = %s
+                                where e.status = 'published'
+                                    and e.start_at >= now()
+                                    and e.category = %s
+                                    and (
+                                                lower(e.target_audience) in ('all', 'all_rc', 'everyone')
+                                                or (%s::text is not null and lower(e.target_audience) = lower(%s::text))
+                                            )
                 group by e.id, u.custom_display_name, u.telegram_display_name, u.telegram_handle
                 order by e.start_at asc
                 limit %s offset %s
                 """,
-                (category, PAGE_SIZE, offset),
+                                (category, viewer_rc, viewer_rc, PAGE_SIZE, offset),
             )
         else:
             cur.execute(
@@ -130,12 +136,17 @@ def list_events(category: str | None = None, page: int = 0) -> list[dict[str, An
                 from events e
                 join users u on u.id = e.creator_user_id
                 left join event_participants ep on ep.event_id = e.id
-                where e.status = 'published' and e.start_at >= now()
+                                where e.status = 'published'
+                                    and e.start_at >= now()
+                                    and (
+                                                lower(e.target_audience) in ('all', 'all_rc', 'everyone')
+                                                or (%s::text is not null and lower(e.target_audience) = lower(%s::text))
+                                            )
                 group by e.id, u.custom_display_name, u.telegram_display_name, u.telegram_handle
                 order by e.start_at asc
                 limit %s offset %s
                 """,
-                (PAGE_SIZE, offset),
+                                (viewer_rc, viewer_rc, PAGE_SIZE, offset),
             )
         return cur.fetchall()
 
@@ -300,20 +311,96 @@ def edit_event_schedule_location(
     start_at: datetime,
     location_text: str,
 ) -> tuple[bool, str]:
+    return edit_event_fields(
+        creator_user_id=creator_user_id,
+        event_id=event_id,
+        start_at=start_at,
+        location_text=location_text,
+    )
+
+
+def edit_event_fields(
+    creator_user_id: str,
+    event_id: str,
+    title: str | None = None,
+    description: str | None = None,
+    category: str | None = None,
+    target_audience: str | None = None,
+    start_at: datetime | None = None,
+    location_text: str | None = None,
+    capacity: int | None = None,
+) -> tuple[bool, str]:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
+            select *
+            from events
+            where id = %s and creator_user_id = %s and status = 'published'
+            for update
+            """,
+            (event_id, creator_user_id),
+        )
+        current_event = cur.fetchone()
+        if not current_event:
+            conn.rollback()
+            return False, "Event not found, unavailable, or you are not the creator."
+
+        if category is not None and category not in CATEGORY_KEYS:
+            conn.rollback()
+            return False, "Invalid category."
+        if capacity is not None and capacity != -1 and capacity <= 0:
+            conn.rollback()
+            return False, "Capacity must be a positive number, or none."
+
+        if target_audience is not None:
+            lower_audience = target_audience.lower()
+            if lower_audience not in {"all", "all_rc", "everyone"} and lower_audience not in ALLOWED_RCS_MAP:
+                conn.rollback()
+                return False, "Invalid target audience."
+            if lower_audience in ALLOWED_RCS_MAP:
+                target_audience = ALLOWED_RCS_MAP[lower_audience]
+            elif lower_audience in {"all", "everyone"}:
+                target_audience = "all_rc"
+
+        next_title = title or current_event["title"]
+        next_description = description or current_event["description"]
+        next_category = category or current_event["category"]
+        next_target_audience = target_audience or current_event["target_audience"]
+        next_start_at = start_at or current_event["start_at"]
+        next_location = location_text or current_event["location_text"]
+        if capacity == -1:
+            next_capacity = None
+        else:
+            next_capacity = current_event["capacity"] if capacity is None else capacity
+        time_changed = next_start_at != current_event["start_at"]
+
+        cur.execute(
+            """
             update events
-            set start_at = %s, location_text = %s, updated_at = now()
+            set title = %s,
+                description = %s,
+                category = %s,
+                target_audience = %s,
+                start_at = %s,
+                location_text = %s,
+                capacity = %s,
+                updated_at = now()
             where id = %s and creator_user_id = %s and status = 'published'
             returning *
             """,
-            (start_at, location_text, event_id, creator_user_id),
+            (
+                next_title,
+                next_description,
+                next_category,
+                next_target_audience,
+                next_start_at,
+                next_location,
+                next_capacity,
+                event_id,
+                creator_user_id,
+            ),
         )
         event = cur.fetchone()
-        if not event:
-            conn.rollback()
-            return False, "Event not found, unavailable, or you are not the creator."
 
         cur.execute(
             """
@@ -327,7 +414,8 @@ def edit_event_schedule_location(
 
         for participant in participants:
             user_id = participant["user_id"]
-            _rebuild_reminder_jobs(cur, event_id, user_id, start_at)
+            if time_changed:
+                _rebuild_reminder_jobs(cur, event_id, user_id, next_start_at)
             cur.execute(
                 """
                 insert into notification_outbox (recipient_user_id, event_id, kind, payload, scheduled_for, dedupe_key)
@@ -337,7 +425,7 @@ def edit_event_schedule_location(
                 (
                     user_id,
                     event_id,
-                    f"event_update:{event_id}:{user_id}:{int(start_at.timestamp())}:{location_text}",
+                    f"event_update:{event_id}:{user_id}:{int(next_start_at.timestamp())}:{next_location}",
                 ),
             )
 

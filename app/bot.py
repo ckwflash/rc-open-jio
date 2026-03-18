@@ -5,7 +5,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
-from app.constants import CATEGORY_KEYS, CATEGORY_LABELS, CATEGORY_NAME_TO_KEY
+from app.constants import ALLOWED_RCS, ALLOWED_RCS_MAP, CATEGORY_KEYS, CATEGORY_NAME_TO_KEY, category_label
 from app import repository
 from app.telegram_api import answer_callback_query, send_message, edit_message_text
 
@@ -20,7 +20,7 @@ MAIN_MENU_KEYBOARD = {
         [{"text": "Browse events"}, {"text": "Create event"}],
         [{"text": "My joined events"}, {"text": "My created events"}],
         [{"text": "Edit my event"}, {"text": "Subscribe categories"}],
-        [{"text": "Show main menu"}],
+        [{"text": "Profile"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -51,11 +51,15 @@ BUTTON_TO_COMMAND = {
     "my created events": "/created",
     "edit my event": "/edit",
     "subscribe categories": "/subscribe",
+    "profile": "/profile",
     "show main menu": "/menu",
 }
 
 CREATE_FLOWS: dict[str, dict[str, Any]] = {}
 EDIT_FLOWS: dict[str, dict[str, Any]] = {}
+PROFILE_FLOWS: dict[str, dict[str, Any]] = {}
+ONBOARDING_FLOWS: dict[str, dict[str, Any]] = {}
+SUBSCRIBE_FLOWS: dict[str, dict[str, Any]] = {}
 
 FLOW_ACTIONS_KEYBOARD = {
     "keyboard": [
@@ -65,10 +69,22 @@ FLOW_ACTIONS_KEYBOARD = {
     "is_persistent": True,
 }
 
+EDIT_FIELD_CHOICE_KEYBOARD = {
+    "keyboard": [
+        [{"text": "Title"}, {"text": "Description"}],
+        [{"text": "Category"}, {"text": "Target Audience"}],
+        [{"text": "Date & Time"}, {"text": "Location"}],
+        [{"text": "Capacity"}],
+        [{"text": "Cancel action"}, {"text": "Show main menu"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
 
 def _build_category_picker_keyboard() -> dict[str, Any]:
     rows: list[list[dict[str, str]]] = []
-    labels = list(CATEGORY_LABELS.values())
+    labels = [category_label(key) for key in CATEGORY_KEYS]
     for i in range(0, len(labels), 2):
         row: list[dict[str, str]] = [{"text": labels[i]}]
         if i + 1 < len(labels):
@@ -86,6 +102,85 @@ def _build_category_picker_keyboard() -> dict[str, Any]:
 CATEGORY_PICKER_KEYBOARD = _build_category_picker_keyboard()
 
 
+def _build_browse_category_keyboard() -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    labels = [category_label(key) for key in CATEGORY_KEYS]
+    for i in range(0, len(labels), 2):
+        row: list[dict[str, str]] = [{"text": labels[i]}]
+        if i + 1 < len(labels):
+            row.append({"text": labels[i + 1]})
+        rows.append(row)
+
+    rows.append([{"text": "View All"}])
+    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    return {
+        "keyboard": rows,
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+BROWSE_CATEGORY_KEYBOARD = _build_browse_category_keyboard()
+
+
+def _build_subscribe_category_keyboard() -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    labels = [category_label(key) for key in CATEGORY_KEYS]
+    for i in range(0, len(labels), 2):
+        row: list[dict[str, str]] = [{"text": labels[i]}]
+        if i + 1 < len(labels):
+            row.append({"text": labels[i + 1]})
+        rows.append(row)
+
+    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    return {
+        "keyboard": rows,
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+SUBSCRIBE_CATEGORY_KEYBOARD = _build_subscribe_category_keyboard()
+
+
+def _build_rc_picker_keyboard() -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    for i in range(0, len(ALLOWED_RCS), 2):
+        row: list[dict[str, str]] = [{"text": ALLOWED_RCS[i]}]
+        if i + 1 < len(ALLOWED_RCS):
+            row.append({"text": ALLOWED_RCS[i + 1]})
+        rows.append(row)
+
+    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    return {
+        "keyboard": rows,
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+RC_PICKER_KEYBOARD = _build_rc_picker_keyboard()
+
+
+def _build_audience_picker_keyboard() -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = [[{"text": "All RCs"}]]
+    for i in range(0, len(ALLOWED_RCS), 2):
+        row: list[dict[str, str]] = [{"text": ALLOWED_RCS[i]}]
+        if i + 1 < len(ALLOWED_RCS):
+            row.append({"text": ALLOWED_RCS[i + 1]})
+        rows.append(row)
+
+    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    return {
+        "keyboard": rows,
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+AUDIENCE_PICKER_KEYBOARD = _build_audience_picker_keyboard()
+
+
 def display_name(user: dict[str, Any]) -> str:
     first = user.get("first_name") or ""
     last = user.get("last_name") or ""
@@ -100,6 +195,13 @@ def handle_text_or_command(text: str) -> str:
     if normalized.startswith("/"):
         return normalized.split(maxsplit=1)[0].split("@")[0]
     return normalized
+
+
+def _category_from_text(text: str) -> str | None:
+    value = text.strip().lower()
+    if value == "view all":
+        return "all"
+    return CATEGORY_NAME_TO_KEY.get(value)
 
 
 def category_buttons() -> list[list[dict[str, str]]]:
@@ -130,6 +232,7 @@ async def process_update(update: dict[str, Any]) -> None:
         telegram_handle=from_user.get("username"),
         display_name=display_name(from_user),
     )
+    profile = repository.get_profile(user["id"])
 
     raw_text = text.strip()
     command = handle_text_or_command(raw_text)
@@ -137,7 +240,22 @@ async def process_update(update: dict[str, Any]) -> None:
 
     if command in {"/start", "/menu", "/help"}:
         _clear_user_flow(user_id)
+        if not profile or not profile.get("rc_name"):
+            ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+            await send_message(
+                chat["id"],
+                "Welcome to RC Open Jio. First, pick your RC to continue:",
+                RC_PICKER_KEYBOARD,
+            )
+            return
         await send_message(chat["id"], MAIN_MENU_TEXT, MAIN_MENU_KEYBOARD)
+        return
+
+    if command in {"/create", "/edit", "/list", "/subscribe", "/joined", "/created"} and (
+        not profile or not profile.get("rc_name")
+    ):
+        ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+        await send_message(chat["id"], "Please set your RC first.", RC_PICKER_KEYBOARD)
         return
 
     if command in {"cancel action", "cancel"}:
@@ -153,6 +271,10 @@ async def process_update(update: dict[str, Any]) -> None:
         await _start_edit_flow(chat["id"], user_id)
         return
 
+    if user_id in ONBOARDING_FLOWS:
+        await _continue_onboarding_flow(chat["id"], user_id, raw_text)
+        return
+
     if user_id in CREATE_FLOWS:
         await _continue_create_flow(chat["id"], user_id, raw_text)
         return
@@ -161,26 +283,50 @@ async def process_update(update: dict[str, Any]) -> None:
         await _continue_edit_flow(chat["id"], user_id, raw_text)
         return
 
+    if user_id in PROFILE_FLOWS:
+        await _continue_profile_flow(chat["id"], user_id, raw_text)
+        return
+
+    if user_id in SUBSCRIBE_FLOWS:
+        await _continue_subscribe_flow(chat["id"], user_id, raw_text)
+        return
+
+    selected_category = _category_from_text(raw_text)
+    if selected_category:
+        if not profile or not profile.get("rc_name"):
+            ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+            await send_message(chat["id"], "Set your RC first to browse events.", RC_PICKER_KEYBOARD)
+            return
+        await _send_event_list(
+            chat_id=chat["id"],
+            category=selected_category,
+            page=0,
+            viewer_rc=profile.get("rc_name"),
+        )
+        return
+
     if command.startswith("/profile"):
-        await _handle_profile(chat["id"], user["id"], text)
+        await _start_profile_flow(chat["id"], user["id"])
         return
 
     if command == "/list":
+        if not profile or not profile.get("rc_name"):
+            ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+            await send_message(chat["id"], "Set your RC first to browse events.", RC_PICKER_KEYBOARD)
+            return
         await send_message(
             chat["id"],
-            "Choose a category:",
-            {"inline_keyboard": category_buttons()},
+            "Choose a category from the keyboard below:",
+            BROWSE_CATEGORY_KEYBOARD,
         )
-        await send_message(chat["id"], "You can continue from the options below too.", LIST_FLOW_KEYBOARD)
         return
 
     if command.startswith("/subscribe"):
-        await send_message(
-            chat["id"],
-            "Choose a category to subscribe:",
-            {"inline_keyboard": _subscription_buttons()},
-        )
-        await send_message(chat["id"], "Subscription options are shown above.", LIST_FLOW_KEYBOARD)
+        if not profile or not profile.get("rc_name"):
+            ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+            await send_message(chat["id"], "Set your RC first to manage subscriptions.", RC_PICKER_KEYBOARD)
+            return
+        await _start_subscribe_flow(chat["id"], user_id)
         return
 
     if command.startswith("/joined"):
@@ -189,9 +335,12 @@ async def process_update(update: dict[str, Any]) -> None:
             await send_message(chat["id"], "You have not joined any events yet.", MAIN_MENU_KEYBOARD)
             return
         lines = ["Your joined events:"]
+        keyboard: list[list[dict[str, str]]] = []
         for event in rows:
             lines.append(f"- {event['title']} ({repository.format_dt(event['start_at'])})")
-        await send_message(chat["id"], "\n".join(lines), MAIN_MENU_KEYBOARD)
+            keyboard.append([{ "text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}" }])
+        await send_message(chat["id"], "\n".join(lines), {"inline_keyboard": keyboard})
+        await send_message(chat["id"], "Use the options below to continue.", MAIN_MENU_KEYBOARD)
         return
 
     if command.startswith("/created"):
@@ -200,10 +349,13 @@ async def process_update(update: dict[str, Any]) -> None:
             await send_message(chat["id"], "You have not created any events yet.", CREATED_FLOW_KEYBOARD)
             return
         lines = ["Your created events:"]
-        for event in rows:
-            lines.append(f"- {event['title']} ({repository.format_dt(event['start_at'])}) | ID: {event['id']}")
+        keyboard: list[list[dict[str, str]]] = []
+        for idx, event in enumerate(rows, start=1):
+            lines.append(f"{idx}. {event['title']} ({repository.format_dt(event['start_at'])})")
+            keyboard.append([{ "text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}" }])
         lines.append("\nTap 'Edit my event' below to update one.")
-        await send_message(chat["id"], "\n".join(lines), CREATED_FLOW_KEYBOARD)
+        await send_message(chat["id"], "\n".join(lines), {"inline_keyboard": keyboard})
+        await send_message(chat["id"], "Use the options below to continue.", CREATED_FLOW_KEYBOARD)
         return
 
     if command.startswith("/edit") and command != "/edit":
@@ -242,6 +394,15 @@ async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
         await send_message(chat_id, f"Invalid category key: {category}", CREATED_FLOW_KEYBOARD)
         return
 
+    if target_audience.lower() in {"all", "all rcs", "all_rc", "everyone"}:
+        target_audience = "all_rc"
+    else:
+        canonical_rc = ALLOWED_RCS_MAP.get(target_audience.lower())
+        if not canonical_rc:
+            await send_message(chat_id, f"Invalid target audience. Use All RCs or one of: {', '.join(ALLOWED_RCS)}", CREATED_FLOW_KEYBOARD)
+            return
+        target_audience = canonical_rc
+
     try:
         local_tz = ZoneInfo(settings.default_timezone)
         local_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
@@ -269,13 +430,13 @@ async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
         location_text=location_text,
         capacity=capacity,
     )
-    await send_message(chat_id, f"Event created: {event['title']} ({event['id']})", CREATED_FLOW_KEYBOARD)
+    await send_message(chat_id, f"Event created: {event['title']}", CREATED_FLOW_KEYBOARD)
 
 
 async def _handle_edit(chat_id: int, user_id: str, text: str) -> None:
     payload = text[len("/edit"):].strip()
     if not payload:
-        await send_message(chat_id, "Format: /edit EventID | YYYY-MM-DD HH:MM | New Location", CREATED_FLOW_KEYBOARD)
+        await send_message(chat_id, "Use /edit and pick event number from the guided flow.", CREATED_FLOW_KEYBOARD)
         return
 
     parts = [p.strip() for p in payload.split("|")]
@@ -305,6 +466,79 @@ async def _handle_edit(chat_id: int, user_id: str, text: str) -> None:
 def _clear_user_flow(user_id: str) -> None:
     CREATE_FLOWS.pop(user_id, None)
     EDIT_FLOWS.pop(user_id, None)
+    PROFILE_FLOWS.pop(user_id, None)
+    ONBOARDING_FLOWS.pop(user_id, None)
+    SUBSCRIBE_FLOWS.pop(user_id, None)
+
+
+async def _continue_onboarding_flow(chat_id: int, user_id: str, text: str) -> None:
+    value = text.strip()
+    canonical = ALLOWED_RCS_MAP.get(value.lower())
+    if not canonical:
+        await send_message(chat_id, "Please pick one RC from the keyboard.", RC_PICKER_KEYBOARD)
+        return
+    repository.set_profile(user_id, None, canonical)
+    ONBOARDING_FLOWS.pop(user_id, None)
+    await send_message(chat_id, f"Great — RC set to {canonical}.", MAIN_MENU_KEYBOARD)
+
+
+async def _start_profile_flow(chat_id: int, user_id: str) -> None:
+    profile = repository.get_profile(user_id)
+    PROFILE_FLOWS[user_id] = {"step": "name"}
+    await send_message(
+        chat_id,
+        (
+            f"Current profile:\n"
+            f"Name: {profile['effective_display_name'] if profile else '-'}\n"
+            f"RC: {profile.get('rc_name') if profile else '-'}\n\n"
+            f"Step 1/2: Enter preferred name (or type 'skip')."
+        ),
+        FLOW_ACTIONS_KEYBOARD,
+    )
+
+
+async def _continue_profile_flow(chat_id: int, user_id: str, text: str) -> None:
+    state = PROFILE_FLOWS.get(user_id)
+    if not state:
+        return
+
+    value = text.strip()
+    if not value:
+        await send_message(chat_id, "Please enter a value.", FLOW_ACTIONS_KEYBOARD)
+        return
+
+    if state["step"] == "name":
+        state["name"] = None if value.lower() in {"skip", "none"} else value[:80]
+        state["step"] = "rc"
+        await send_message(chat_id, "Step 2/2: Pick your RC.", RC_PICKER_KEYBOARD)
+        return
+
+    if state["step"] == "rc":
+        canonical = ALLOWED_RCS_MAP.get(value.lower())
+        if not canonical:
+            await send_message(chat_id, "Please pick one RC from the keyboard.", RC_PICKER_KEYBOARD)
+            return
+        repository.set_profile(user_id, state.get("name"), canonical)
+        PROFILE_FLOWS.pop(user_id, None)
+        await send_message(chat_id, f"Profile updated. RC: {canonical}", MAIN_MENU_KEYBOARD)
+        return
+
+
+async def _start_subscribe_flow(chat_id: int, user_id: str) -> None:
+    SUBSCRIBE_FLOWS[user_id] = {"step": "category"}
+    await send_message(chat_id, "Choose a category to subscribe:", SUBSCRIBE_CATEGORY_KEYBOARD)
+
+
+async def _continue_subscribe_flow(chat_id: int, user_id: str, text: str) -> None:
+    value = text.strip()
+    key = CATEGORY_NAME_TO_KEY.get(value.lower())
+    if not key or key not in CATEGORY_KEYS:
+        await send_message(chat_id, "Please pick a category from the keyboard.", SUBSCRIBE_CATEGORY_KEYBOARD)
+        return
+
+    repository.subscribe_category(user_id, key)
+    SUBSCRIBE_FLOWS.pop(user_id, None)
+    await send_message(chat_id, f"Subscribed to {category_label(key)}", LIST_FLOW_KEYBOARD)
 
 
 async def _start_create_flow(chat_id: int, user_id: str) -> None:
@@ -344,13 +578,20 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
         state["step"] = "target_audience"
         await send_message(
             chat_id,
-            "Creating event (3/7): Enter target audience (e.g. all_rc, rc4_only, everyone).",
-            FLOW_ACTIONS_KEYBOARD,
+            "Creating event (3/7): Pick target audience.",
+            AUDIENCE_PICKER_KEYBOARD,
         )
         return
 
     if step == "target_audience":
-        data["target_audience"] = value
+        if value.lower() == "all rcs":
+            data["target_audience"] = "all_rc"
+        else:
+            canonical = ALLOWED_RCS_MAP.get(value.lower())
+            if not canonical:
+                await send_message(chat_id, "Invalid audience. Choose from keyboard.", AUDIENCE_PICKER_KEYBOARD)
+                return
+            data["target_audience"] = canonical
         state["step"] = "start_at"
         await send_message(
             chat_id,
@@ -411,7 +652,7 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
             capacity=data["capacity"],
         )
         CREATE_FLOWS.pop(user_id, None)
-        await send_message(chat_id, f"Event created: {event['title']} ({event['id']})", CREATED_FLOW_KEYBOARD)
+        await send_message(chat_id, f"Event created: {event['title']}", CREATED_FLOW_KEYBOARD)
 
 
 async def _start_edit_flow(chat_id: int, user_id: str) -> None:
@@ -420,12 +661,13 @@ async def _start_edit_flow(chat_id: int, user_id: str) -> None:
         await send_message(chat_id, "You have not created any events yet.", CREATED_FLOW_KEYBOARD)
         return
 
-    valid_ids = {str(row["id"]) for row in rows}
-    lines = ["Editing event. Step 1/3: Enter Event ID from your list:"]
-    for row in rows:
-        lines.append(f"- {row['title']} | ID: {str(row['id'])}")
+    lines = ["Editing event. Step 1/3: Enter event number:"]
+    index_map: dict[str, str] = {}
+    for idx, row in enumerate(rows, start=1):
+        index_map[str(idx)] = str(row["id"])
+        lines.append(f"{idx}. {row['title']} ({repository.format_dt(row['start_at'])})")
 
-    EDIT_FLOWS[user_id] = {"step": "event_id", "data": {}, "valid_ids": valid_ids}
+    EDIT_FLOWS[user_id] = {"step": "event_index", "data": {}, "index_map": index_map}
     await send_message(chat_id, "\n".join(lines), FLOW_ACTIONS_KEYBOARD)
 
 
@@ -442,38 +684,112 @@ async def _continue_edit_flow(chat_id: int, user_id: str, text: str) -> None:
     data = state["data"]
     step = state["step"]
 
-    if step == "event_id":
-        if value not in state["valid_ids"]:
-            await send_message(chat_id, "Invalid Event ID. Paste one from the list above.", FLOW_ACTIONS_KEYBOARD)
+    if step == "event_index":
+        event_id = state["index_map"].get(value)
+        if not event_id:
+            await send_message(chat_id, "Invalid event number. Choose one from the list above.", FLOW_ACTIONS_KEYBOARD)
             return
-        data["event_id"] = value
-        state["step"] = "start_at"
+        data["event_id"] = event_id
+        state["step"] = "field_choice"
         await send_message(
             chat_id,
-            f"Editing event (2/3): Enter new date/time in {settings.default_timezone} as YYYY-MM-DD HH:MM",
-            FLOW_ACTIONS_KEYBOARD,
+            "Editing event (2/3): Choose what to edit.",
+            EDIT_FIELD_CHOICE_KEYBOARD,
         )
         return
 
-    if step == "start_at":
-        try:
-            local_tz = ZoneInfo(settings.default_timezone)
-            local_dt = datetime.strptime(value, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
-            data["start_at"] = local_dt.astimezone(UTC)
-        except ValueError:
-            await send_message(chat_id, "Invalid datetime format. Use YYYY-MM-DD HH:MM", FLOW_ACTIONS_KEYBOARD)
+    if step == "field_choice":
+        choice = value.lower()
+        field_map = {
+            "title": "title",
+            "description": "description",
+            "category": "category",
+            "target audience": "target_audience",
+            "date & time": "start_at",
+            "location": "location_text",
+            "capacity": "capacity",
+        }
+        selected = field_map.get(choice)
+        if not selected:
+            await send_message(chat_id, "Choose one option from the keyboard.", EDIT_FIELD_CHOICE_KEYBOARD)
             return
-        state["step"] = "location"
-        await send_message(chat_id, "Editing event (3/3): Enter new location.", FLOW_ACTIONS_KEYBOARD)
+        data["field"] = selected
+        state["step"] = "field_value"
+
+        if selected == "category":
+            await send_message(chat_id, "Step 3/3: Pick a new category.", CATEGORY_PICKER_KEYBOARD)
+            return
+        if selected == "target_audience":
+            await send_message(chat_id, "Step 3/3: Pick new target audience.", AUDIENCE_PICKER_KEYBOARD)
+            return
+        if selected == "start_at":
+            await send_message(
+                chat_id,
+                f"Step 3/3: Enter new date/time in {settings.default_timezone} as YYYY-MM-DD HH:MM",
+                FLOW_ACTIONS_KEYBOARD,
+            )
+            return
+        if selected == "capacity":
+            await send_message(chat_id, "Step 3/3: Enter new capacity or type 'none'.", FLOW_ACTIONS_KEYBOARD)
+            return
+
+        await send_message(chat_id, "Step 3/3: Enter new value.", FLOW_ACTIONS_KEYBOARD)
         return
 
-    if step == "location":
-        data["location_text"] = value
-        ok, msg = repository.edit_event_schedule_location(
+    if step == "field_value":
+        field = data.get("field")
+        kwargs: dict[str, Any] = {}
+
+        if field == "title":
+            kwargs["title"] = value
+        elif field == "description":
+            kwargs["description"] = value
+        elif field == "category":
+            key = CATEGORY_NAME_TO_KEY.get(value.lower(), value.lower())
+            if key not in CATEGORY_KEYS:
+                await send_message(chat_id, "Invalid category. Please tap one from keyboard.", CATEGORY_PICKER_KEYBOARD)
+                return
+            kwargs["category"] = key
+        elif field == "target_audience":
+            if value.lower() == "all rcs":
+                kwargs["target_audience"] = "all_rc"
+            else:
+                canonical = ALLOWED_RCS_MAP.get(value.lower())
+                if not canonical:
+                    await send_message(chat_id, "Invalid audience. Choose from keyboard.", AUDIENCE_PICKER_KEYBOARD)
+                    return
+                kwargs["target_audience"] = canonical
+        elif field == "start_at":
+            try:
+                local_tz = ZoneInfo(settings.default_timezone)
+                local_dt = datetime.strptime(value, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
+                kwargs["start_at"] = local_dt.astimezone(UTC)
+            except ValueError:
+                await send_message(chat_id, "Invalid datetime format. Use YYYY-MM-DD HH:MM", FLOW_ACTIONS_KEYBOARD)
+                return
+        elif field == "location_text":
+            kwargs["location_text"] = value
+        elif field == "capacity":
+            if value.lower() in {"none", "no limit", "unlimited"}:
+                kwargs["capacity"] = -1
+            else:
+                try:
+                    cap = int(value)
+                    if cap <= 0:
+                        raise ValueError
+                    kwargs["capacity"] = cap
+                except ValueError:
+                    await send_message(chat_id, "Capacity must be a positive number or 'none'.", FLOW_ACTIONS_KEYBOARD)
+                    return
+        else:
+            await send_message(chat_id, "Invalid edit field. Start again with /edit.", CREATED_FLOW_KEYBOARD)
+            EDIT_FLOWS.pop(user_id, None)
+            return
+
+        ok, msg = repository.edit_event_fields(
             creator_user_id=user_id,
             event_id=data["event_id"],
-            start_at=data["start_at"],
-            location_text=data["location_text"],
+            **kwargs,
         )
         EDIT_FLOWS.pop(user_id, None)
         await send_message(chat_id, msg if ok else f"Unable to edit event: {msg}", CREATED_FLOW_KEYBOARD)
@@ -493,30 +809,22 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
         telegram_handle=from_user.get("username"),
         display_name=display_name(from_user),
     )
+    profile = repository.get_profile(user["id"])
 
     if data.startswith("cat:"):
         await answer_callback_query(query["id"])
+        if not profile or not profile.get("rc_name"):
+            ONBOARDING_FLOWS[user["id"]] = {"step": "rc"}
+            await send_message(chat["id"], "Set your RC first to browse events.", RC_PICKER_KEYBOARD)
+            return
         _, category, page_s = data.split(":", 2)
         page = int(page_s)
-        category_filter = None if category == "all" else category
-        rows = repository.list_events(category=category_filter, page=page)
-
-        if not rows:
-            await send_message(chat["id"], "No events found.")
-            return
-
-        lines = ["Available events:"]
-        keyboard: list[list[dict[str, str]]] = []
-        for event in rows:
-            lines.append(
-                f"- {event['title']} | {category_label(event['category'])} | {repository.format_dt(event['start_at'])}"
-            )
-            keyboard.append([{ "text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}" }])
-
-        if len(rows) == repository.PAGE_SIZE:
-            keyboard.append([{ "text": "Next", "callback_data": f"cat:{category}:{page + 1}" }])
-
-        await send_message(chat["id"], "\n".join(lines), {"inline_keyboard": keyboard})
+        await _send_event_list(
+            chat_id=chat["id"],
+            category=category,
+            page=page,
+            viewer_rc=profile.get("rc_name"),
+        )
         return
 
     if data.startswith("evt:"):
@@ -624,6 +932,10 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
         return
 
     if data.startswith("subc:"):
+        if not profile or not profile.get("rc_name"):
+            ONBOARDING_FLOWS[user["id"]] = {"step": "rc"}
+            await send_message(chat["id"], "Set your RC first to manage subscriptions.", RC_PICKER_KEYBOARD)
+            return
         category = data.split(":", 1)[1]
         repository.subscribe_category(user["id"], category)
         await answer_callback_query(query["id"], "Subscribed")
@@ -633,44 +945,31 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
     await answer_callback_query(query["id"])
 
 
+async def _send_event_list(chat_id: int, category: str, page: int, viewer_rc: str | None) -> None:
+    category_filter = None if category == "all" else category
+    rows = repository.list_events(category=category_filter, page=page, viewer_rc=viewer_rc)
+
+    if not rows:
+        await send_message(chat_id, "No events found.")
+        return
+
+    lines = ["Available events:"]
+    keyboard: list[list[dict[str, str]]] = []
+    for event in rows:
+        lines.append(
+            f"- {event['title']} | {category_label(event['category'])} | {repository.format_dt(event['start_at'])}"
+        )
+        keyboard.append([{ "text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}" }])
+
+    if len(rows) == repository.PAGE_SIZE:
+        keyboard.append([{ "text": "Next", "callback_data": f"cat:{category}:{page + 1}" }])
+
+    await send_message(chat_id, "\n".join(lines), {"inline_keyboard": keyboard})
+    await send_message(chat_id, "Use the options below to continue.", LIST_FLOW_KEYBOARD)
+
+
 def _subscription_buttons() -> list[list[dict[str, str]]]:
     rows: list[list[dict[str, str]]] = []
     for key in CATEGORY_KEYS:
         rows.append([{ "text": category_label(key), "callback_data": f"subc:{key}" }])
     return rows
-
-
-async def _handle_profile(chat_id: int, user_id: str, text: str) -> None:
-    payload = text[len("/profile"):].strip()
-    if not payload:
-        profile = repository.get_profile(user_id)
-        if not profile:
-            await send_message(chat_id, "Profile not found.")
-            return
-        await send_message(
-            chat_id,
-            (
-                f"Current profile:\n"
-                f"Name: {profile['effective_display_name']}\n"
-                f"RC: {profile.get('rc_name') or '-'}\n\n"
-                f"Set format:\n/profile Preferred Name | RC Name\n"
-                f"Allowed RCs: {', '.join(ALLOWED_RCS)}\n"
-                f"Example:\n/profile Kaiwen | Tembusu"
-            ),
-        )
-        return
-
-    parts = [p.strip() for p in payload.split("|", 1)]
-    if len(parts) != 2:
-        await send_message(chat_id, "Use: /profile Preferred Name | RC Name")
-        return
-
-    preferred_name, rc_name = parts
-    preferred_name = preferred_name[:80]
-    rc_name = rc_name[:80]
-    try:
-        repository.set_profile(user_id, preferred_name or None, rc_name or None)
-    except ValueError as ex:
-        await send_message(chat_id, str(ex))
-        return
-    await send_message(chat_id, f"Profile updated. Name: {preferred_name or '-'} | RC: {rc_name or '-'}")
