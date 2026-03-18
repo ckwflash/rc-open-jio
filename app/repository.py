@@ -69,31 +69,6 @@ def create_event(
         )
         _rebuild_reminder_jobs(cur, event["id"], creator_user_id, start_at)
 
-        cur.execute(
-            """
-            insert into notification_outbox (recipient_user_id, event_id, kind, payload, scheduled_for, dedupe_key)
-            select
-                s.subscriber_user_id,
-                %s::uuid,
-                'new_event_subscription',
-                jsonb_build_object('title', %s::text, 'category', %s::text),
-                now(),
-                concat('new_event_subscription:', s.subscriber_user_id::text, ':', %s::uuid::text)
-            from event_subscriptions s
-            where (s.kind = 'category' and s.category = %s::event_category)
-               or (s.kind = 'creator' and s.creator_user_id = %s::uuid)
-            on conflict (dedupe_key) do nothing
-            """,
-            (
-                event["id"],
-                event["title"],
-                event["category"],
-                event["id"],
-                event["category"],
-                event["creator_user_id"],
-            ),
-        )
-
         conn.commit()
         return event
 
@@ -447,6 +422,31 @@ def subscribe_category(subscriber_user_id: str, category: str) -> None:
             (subscriber_user_id, category),
         )
         conn.commit()
+
+
+def list_category_subscription_recipients(
+    category: str,
+    target_audience: str,
+    creator_user_id: str,
+) -> list[int]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select distinct u.telegram_user_id
+            from event_subscriptions s
+            join users u on u.id = s.subscriber_user_id
+            where s.kind = 'category'
+              and s.category = %s::event_category
+              and u.id <> %s::uuid
+              and (
+                    lower(%s::text) in ('all', 'all_rc', 'everyone')
+                    or (u.rc_name is not null and lower(u.rc_name) = lower(%s::text))
+                  )
+            """,
+            (category, creator_user_id, target_audience, target_audience),
+        )
+        rows = cur.fetchall()
+        return [int(row["telegram_user_id"]) for row in rows]
 
 
 def subscribe_creator(subscriber_user_id: str, creator_user_id: str) -> None:

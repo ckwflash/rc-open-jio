@@ -430,6 +430,7 @@ async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
         location_text=location_text,
         capacity=capacity,
     )
+    await _notify_category_subscribers_for_event(event)
     await send_message(chat_id, f"Event created: {event['title']}", CREATED_FLOW_KEYBOARD)
 
 
@@ -651,6 +652,7 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
             location_text=data["location_text"],
             capacity=data["capacity"],
         )
+        await _notify_category_subscribers_for_event(event)
         CREATE_FLOWS.pop(user_id, None)
         await send_message(chat_id, f"Event created: {event['title']}", CREATED_FLOW_KEYBOARD)
 
@@ -966,6 +968,32 @@ async def _send_event_list(chat_id: int, category: str, page: int, viewer_rc: st
 
     await send_message(chat_id, "\n".join(lines), {"inline_keyboard": keyboard})
     await send_message(chat_id, "Use the options below to continue.", LIST_FLOW_KEYBOARD)
+
+
+async def _notify_category_subscribers_for_event(event: dict[str, Any]) -> None:
+    recipients = repository.list_category_subscription_recipients(
+        category=event["category"],
+        target_audience=event["target_audience"],
+        creator_user_id=event["creator_user_id"],
+    )
+
+    if not recipients:
+        return
+
+    text = (
+        "New event in your subscribed category:\n"
+        f"{event['title']}\n"
+        f"Category: {category_label(event['category'])}\n"
+        f"Time: {repository.format_dt(event['start_at'])}\n"
+        f"Location: {event['location_text']}"
+    )
+    keyboard = [[{"text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}"}]]
+
+    for chat_id in recipients:
+        try:
+            await send_message(chat_id, text, {"inline_keyboard": keyboard})
+        except Exception:  # noqa: BLE001
+            continue
 
 
 def _subscription_buttons() -> list[list[dict[str, str]]]:
