@@ -7,6 +7,14 @@ import httpx
 from app.config import settings
 
 BASE_URL = f"https://api.telegram.org/bot{settings.bot_token}"
+_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _CLIENT
+    if _CLIENT is None:
+        _CLIENT = httpx.AsyncClient(timeout=10)
+    return _CLIENT
 
 
 async def send_message(chat_id: int, text: str, reply_markup: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -18,11 +26,10 @@ async def send_message(chat_id: int, text: str, reply_markup: dict[str, Any] | N
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.post(f"{BASE_URL}/sendMessage", json=payload)
-        if response.status_code == 200:
-            return response.json().get("result")
-        return None
+    response = await _get_client().post(f"{BASE_URL}/sendMessage", json=payload)
+    if response.status_code == 200:
+        return response.json().get("result")
+    return None
 
 
 async def answer_callback_query(callback_query_id: str, text: str | None = None) -> None:
@@ -32,8 +39,7 @@ async def answer_callback_query(callback_query_id: str, text: str | None = None)
     if text:
         payload["text"] = text
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        await client.post(f"{BASE_URL}/answerCallbackQuery", json=payload)
+    await _get_client().post(f"{BASE_URL}/answerCallbackQuery", json=payload)
 
 
 async def edit_message_text(chat_id: int, message_id: int, text: str, reply_markup: dict[str, Any] | None = None) -> None:
@@ -47,5 +53,4 @@ async def edit_message_text(chat_id: int, message_id: int, text: str, reply_mark
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        await client.post(f"{BASE_URL}/editMessageText", json=payload)
+    await _get_client().post(f"{BASE_URL}/editMessageText", json=payload)

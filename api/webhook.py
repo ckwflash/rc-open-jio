@@ -16,10 +16,9 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/")
-async def telegram_webhook(
+async def _handle_webhook_request(
     request: Request,
-    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+    x_telegram_bot_api_secret_token: str | None = None,
 ) -> dict[str, bool]:
     if not settings.dev_mode:
         if not settings.webhook_secret:
@@ -35,8 +34,18 @@ async def telegram_webhook(
         logger.exception("Failed to process Telegram update")
     return {"ok": True}
 
+
+@app.post("/")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    return await _handle_webhook_request(request, x_telegram_bot_api_secret_token)
+
+
 @app.post("/api/webhook")
-async def webhook(request: Request):
-    update = await request.json()
-    await process_update(update)
-    return {"ok": True}
+async def webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    return await _handle_webhook_request(request, x_telegram_bot_api_secret_token)
