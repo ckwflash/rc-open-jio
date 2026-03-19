@@ -69,31 +69,6 @@ def create_event(
         )
         _rebuild_reminder_jobs(cur, event["id"], creator_user_id, start_at)
 
-        cur.execute(
-            """
-            insert into notification_outbox (recipient_user_id, event_id, kind, payload, scheduled_for, dedupe_key)
-            select
-                s.subscriber_user_id,
-                %s::uuid,
-                'new_event_subscription',
-                jsonb_build_object('title', %s::text, 'category', %s::text),
-                now(),
-                concat('new_event_subscription:', s.subscriber_user_id::text, ':', %s::uuid::text)
-            from event_subscriptions s
-            where (s.kind = 'category' and s.category = %s::event_category)
-               or (s.kind = 'creator' and s.creator_user_id = %s::uuid)
-            on conflict (dedupe_key) do nothing
-            """,
-            (
-                event["id"],
-                event["title"],
-                event["category"],
-                event["id"],
-                event["category"],
-                event["creator_user_id"],
-            ),
-        )
-
         conn.commit()
         return event
 
@@ -501,6 +476,63 @@ def subscribe_category(subscriber_user_id: str, category: str) -> None:
         conn.commit()
 
 
+def list_category_subscriptions(subscriber_user_id: str) -> list[str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select category::text as category
+            from event_subscriptions
+            where subscriber_user_id = %s
+              and kind = 'category'
+            order by category::text asc
+            """,
+            (subscriber_user_id,),
+        )
+        rows = cur.fetchall()
+        return [row["category"] for row in rows]
+
+
+def remove_category_subscription(subscriber_user_id: str, category: str) -> bool:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            delete from event_subscriptions
+            where subscriber_user_id = %s
+              and kind = 'category'
+              and category = %s::event_category
+            """,
+            (subscriber_user_id, category),
+        )
+        deleted = cur.rowcount > 0
+        conn.commit()
+        return deleted
+
+
+def list_category_subscription_recipients(
+    category: str,
+    target_audience: str,
+    creator_user_id: str,
+) -> list[int]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select distinct u.telegram_user_id
+            from event_subscriptions s
+            join users u on u.id = s.subscriber_user_id
+            where s.kind = 'category'
+              and s.category = %s::event_category
+              and u.id <> %s::uuid
+              and (
+                    lower(%s::text) in ('all', 'all_rc', 'everyone')
+                    or (u.rc_name is not null and lower(u.rc_name) = lower(%s::text))
+                  )
+            """,
+            (category, creator_user_id, target_audience, target_audience),
+        )
+        rows = cur.fetchall()
+        return [int(row["telegram_user_id"]) for row in rows]
+
+
 def subscribe_creator(subscriber_user_id: str, creator_user_id: str) -> None:
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -635,3 +667,43 @@ def get_event_for_notification(event_id: str) -> dict[str, Any] | None:
 def format_dt(dt: datetime) -> str:
     tz = ZoneInfo(settings.default_timezone)
     return dt.astimezone(tz).strftime("%d %b %Y, %I:%M %p")
+
+def leave_event(event_id: str, user_id: str) -> tuple[bool, str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        # Check if event exists
+        cur.execute("select * from events where id = %s and status = 'published'", (event_id,))
+        event = cur.fetchone()
+        if not event:
+            conn.rollback()
+            return False, "Event not found."
+        
+        # Check if user is the creator (can't leave if you're the creator)
+        if event["creator_user_id"] == user_id:
+            conn.rollback()
+            return False, "You cannot leave an event you created. You can delete it instead."
+        
+        # Remove user from participants
+        cur.execute(
+            "delete from event_participants where event_id = %s and user_id = %s",
+            (event_id, user_id),
+        )
+        
+        # Check if anything was deleted
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False, "You are not a participant of this event."
+        
+        # Update reminder jobs (remove reminders for this user)
+        cur.execute(
+            """
+            delete from notification_outbox
+            where event_id = %s
+              and recipient_user_id = %s
+              and kind in ('reminder_24h', 'reminder_1h')
+              and status in ('pending', 'processing')
+            """,
+            (event_id, user_id),
+        )
+        
+        conn.commit()
+        return True, "You have left this event."
