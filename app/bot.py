@@ -36,8 +36,8 @@ LIST_FLOW_KEYBOARD = {
 
 CREATED_FLOW_KEYBOARD = {
     "keyboard": [
-        [{"text": "Create event"}, {"text": "Edit my event"}],
-        [{"text": "My created events"}, {"text": "◀️ Home"}],
+        [{"text": "Edit my event"}, {"text": "Delete my event"}],
+        [{"text": "Create event"}, {"text": "◀️ Home"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -49,6 +49,7 @@ BUTTON_TO_COMMAND = {
     "my joined events": "/joined",
     "my created events": "/created",
     "edit my event": "/edit",
+    "delete my event": "/delete",
     "subscribe categories": "/subscribe",
     "profile": "/profile",
     "show main menu": "/menu",
@@ -58,6 +59,7 @@ BUTTON_TO_COMMAND = {
 
 CREATE_FLOWS: dict[str, dict[str, Any]] = {}
 EDIT_FLOWS: dict[str, dict[str, Any]] = {}
+DELETE_FLOWS: dict[str, dict[str, Any]] = {}
 PROFILE_FLOWS: dict[str, dict[str, Any]] = {}
 ONBOARDING_FLOWS: dict[str, dict[str, Any]] = {}
 SUBSCRIBE_FLOWS: dict[str, dict[str, Any]] = {}
@@ -341,7 +343,7 @@ async def process_update(update: dict[str, Any]) -> None:
         await send_message(chat["id"], MAIN_MENU_TEXT, MAIN_MENU_KEYBOARD)
         return
 
-    if command in {"/create", "/edit", "/list", "/subscribe", "/joined", "/created"} and (
+    if command in {"/create", "/edit", "/delete", "/list", "/subscribe", "/joined", "/created"} and (
         not profile or not profile.get("rc_name")
     ):
         ONBOARDING_FLOWS[user_id] = {"step": "rc"}
@@ -361,6 +363,10 @@ async def process_update(update: dict[str, Any]) -> None:
         await _start_edit_flow(chat["id"], user_id)
         return
 
+    if command == "/delete":
+        await _start_delete_flow(chat["id"], user_id)
+        return
+
     if user_id in ONBOARDING_FLOWS:
         await _continue_onboarding_flow(chat["id"], user_id, raw_text)
         return
@@ -371,6 +377,10 @@ async def process_update(update: dict[str, Any]) -> None:
 
     if user_id in EDIT_FLOWS:
         await _continue_edit_flow(chat["id"], user_id, raw_text)
+        return
+
+    if user_id in DELETE_FLOWS:
+        await _continue_delete_flow(chat["id"], user_id, raw_text)
         return
 
     if user_id in PROFILE_FLOWS:
@@ -443,7 +453,7 @@ async def process_update(update: dict[str, Any]) -> None:
         for idx, event in enumerate(rows, start=1):
             lines.append(f"{idx}. {event['title']} ({repository.format_dt(event['start_at'])})")
             keyboard.append([{ "text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}" }])
-        lines.append("\nTap 'Edit my event' below to update one.")
+        lines.append("\nUse the bottom keyboard to edit, delete, create, or go home.")
         await send_message(chat["id"], "\n".join(lines), {"inline_keyboard": keyboard})
         await send_message(chat["id"], "Use the options below to continue.", CREATED_FLOW_KEYBOARD)
         return
@@ -558,6 +568,7 @@ async def _handle_edit(chat_id: int, user_id: str, text: str) -> None:
 def _clear_user_flow(user_id: str) -> None:
     CREATE_FLOWS.pop(user_id, None)
     EDIT_FLOWS.pop(user_id, None)
+    DELETE_FLOWS.pop(user_id, None)
     PROFILE_FLOWS.pop(user_id, None)
     ONBOARDING_FLOWS.pop(user_id, None)
     SUBSCRIBE_FLOWS.pop(user_id, None)
@@ -980,6 +991,71 @@ async def _continue_edit_flow(chat_id: int, user_id: str, text: str) -> None:
         await send_message(chat_id, msg if ok else f"Unable to edit event: {msg}", CREATED_FLOW_KEYBOARD)
 
 
+async def _start_delete_flow(chat_id: int, user_id: str) -> None:
+    rows = repository.list_created_events(user_id)
+    if not rows:
+        await send_message(chat_id, "You have not created any events yet.", CREATED_FLOW_KEYBOARD)
+        return
+
+    lines = ["Deleting event. Step 1/2: Enter event number:"]
+    index_map: dict[str, str] = {}
+    for idx, row in enumerate(rows, start=1):
+        index_map[str(idx)] = str(row["id"])
+        lines.append(f"{idx}. {row['title']} ({repository.format_dt(row['start_at'])})")
+
+    DELETE_FLOWS[user_id] = {"step": "event_index", "data": {}, "index_map": index_map}
+    await send_message(chat_id, "\n".join(lines), FLOW_ACTIONS_KEYBOARD)
+
+
+async def _continue_delete_flow(chat_id: int, user_id: str, text: str) -> None:
+    state = DELETE_FLOWS.get(user_id)
+    if not state:
+        return
+
+    value = text.strip()
+    if not value:
+        await send_message(chat_id, "Please enter a value.", FLOW_ACTIONS_KEYBOARD)
+        return
+
+    data = state["data"]
+    step = state["step"]
+
+    if step == "event_index":
+        event_id = state["index_map"].get(value)
+        if not event_id:
+            await send_message(chat_id, "Invalid event number. Choose one from the list above.", FLOW_ACTIONS_KEYBOARD)
+            return
+        
+        event = repository.get_event(event_id)
+        if not event:
+            await send_message(chat_id, "Event not found.", CREATED_FLOW_KEYBOARD)
+            DELETE_FLOWS.pop(user_id, None)
+            return
+        
+        data["event_id"] = event_id
+        data["event_title"] = event["title"]
+        state["step"] = "confirm"
+        await send_message(
+            chat_id,
+            f"⚠️ Are you sure you want to delete '{event['title']}'?\n\nAll participants will lose access to this event and reminders will be cancelled.\n\nType 'yes' to confirm or 'no' to cancel.",
+            FLOW_ACTIONS_KEYBOARD,
+        )
+        return
+
+    if step == "confirm":
+        if value.lower() not in {"yes", "y"}:
+            DELETE_FLOWS.pop(user_id, None)
+            await send_message(chat_id, f"Deletion of '{data.get('event_title')}' cancelled.", CREATED_FLOW_KEYBOARD)
+            return
+
+        ok, msg = repository.delete_event(
+            creator_user_id=user_id,
+            event_id=data["event_id"],
+        )
+        DELETE_FLOWS.pop(user_id, None)
+        await send_message(chat_id, msg if ok else f"Unable to delete event: {msg}", CREATED_FLOW_KEYBOARD)
+
+
 async def _handle_callback_query(query: dict[str, Any]) -> None:
     data = query.get("data") or ""
     from_user = query.get("from") or {}
@@ -1061,6 +1137,16 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
             ]
 
         await send_message(chat["id"], text, {"inline_keyboard": keyboard})
+        return
+
+    if data == "created:edit":
+        await answer_callback_query(query["id"])
+        await _start_edit_flow(chat["id"], user["id"])
+        return
+
+    if data == "created:delete":
+        await answer_callback_query(query["id"])
+        await _start_delete_flow(chat["id"], user["id"])
         return
 
     if data.startswith("jn:"):

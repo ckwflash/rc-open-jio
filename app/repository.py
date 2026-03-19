@@ -408,6 +408,58 @@ def edit_event_fields(
         return True, "Event updated and participants were notified."
 
 
+def delete_event(creator_user_id: str, event_id: str) -> tuple[bool, str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select *
+            from events
+            where id = %s and creator_user_id = %s
+            for update
+            """,
+            (event_id, creator_user_id),
+        )
+        event = cur.fetchone()
+        if not event:
+            conn.rollback()
+            return False, "Event not found or you are not the creator."
+
+        cur.execute(
+            """
+            delete from notification_outbox
+            where event_id = %s
+            """,
+            (event_id,),
+        )
+
+        cur.execute(
+            """
+            delete from event_participants
+            where event_id = %s
+            """,
+            (event_id,),
+        )
+
+        cur.execute(
+            """
+            delete from event_subscriptions
+            where kind = 'creator' and creator_user_id = %s
+            """,
+            (creator_user_id,),
+        )
+
+        cur.execute(
+            """
+            delete from events
+            where id = %s and creator_user_id = %s
+            """,
+            (event_id, creator_user_id),
+        )
+
+        conn.commit()
+        return True, f"Event '{event['title']}' has been deleted."
+
+
 def subscribe_category(subscriber_user_id: str, category: str) -> None:
     if category not in CATEGORY_KEYS:
         raise ValueError("Invalid category")
