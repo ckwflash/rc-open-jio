@@ -19,8 +19,7 @@ MAIN_MENU_KEYBOARD = {
     "keyboard": [
         [{"text": "Browse events"}, {"text": "Create event"}],
         [{"text": "My joined events"}, {"text": "My created events"}],
-        [{"text": "Edit my event"}, {"text": "Subscribe categories"}],
-        [{"text": "Profile"}],
+        [{"text": "Subscribe categories"}, {"text": "Profile"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -29,7 +28,7 @@ MAIN_MENU_KEYBOARD = {
 LIST_FLOW_KEYBOARD = {
     "keyboard": [
         [{"text": "Browse events"}, {"text": "Subscribe categories"}],
-        [{"text": "Show main menu"}],
+        [{"text": "◀️ Home"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -38,7 +37,7 @@ LIST_FLOW_KEYBOARD = {
 CREATED_FLOW_KEYBOARD = {
     "keyboard": [
         [{"text": "Create event"}, {"text": "Edit my event"}],
-        [{"text": "My created events"}, {"text": "Show main menu"}],
+        [{"text": "My created events"}, {"text": "◀️ Home"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -53,6 +52,8 @@ BUTTON_TO_COMMAND = {
     "subscribe categories": "/subscribe",
     "profile": "/profile",
     "show main menu": "/menu",
+    "◀️ home": "/menu",
+    "❌ cancel": "/cancel",
 }
 
 CREATE_FLOWS: dict[str, dict[str, Any]] = {}
@@ -63,7 +64,7 @@ SUBSCRIBE_FLOWS: dict[str, dict[str, Any]] = {}
 
 FLOW_ACTIONS_KEYBOARD = {
     "keyboard": [
-        [{"text": "Cancel action"}, {"text": "Show main menu"}],
+        [{"text": "❌ Cancel"}, {"text": "◀️ Home"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -75,7 +76,7 @@ EDIT_FIELD_CHOICE_KEYBOARD = {
         [{"text": "Category"}, {"text": "Target Audience"}],
         [{"text": "Date & Time"}, {"text": "Location"}],
         [{"text": "Capacity"}],
-        [{"text": "Cancel action"}, {"text": "Show main menu"}],
+        [{"text": "❌ Cancel"}, {"text": "◀️ Home"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -91,7 +92,7 @@ def _build_category_picker_keyboard() -> dict[str, Any]:
             row.append({"text": labels[i + 1]})
         rows.append(row)
 
-    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    rows.append([{"text": "❌ Cancel"}, {"text": "◀️ Home"}])
     return {
         "keyboard": rows,
         "resize_keyboard": True,
@@ -112,7 +113,7 @@ def _build_browse_category_keyboard() -> dict[str, Any]:
         rows.append(row)
 
     rows.append([{"text": "View All"}])
-    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    rows.append([{"text": "❌ Cancel"}, {"text": "◀️ Home"}])
     return {
         "keyboard": rows,
         "resize_keyboard": True,
@@ -132,7 +133,7 @@ def _build_subscribe_category_keyboard() -> dict[str, Any]:
             row.append({"text": labels[i + 1]})
         rows.append(row)
 
-    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    rows.append([{"text": "❌ Cancel"}, {"text": "◀️ Home"}])
     return {
         "keyboard": rows,
         "resize_keyboard": True,
@@ -145,7 +146,16 @@ SUBSCRIBE_CATEGORY_KEYBOARD = _build_subscribe_category_keyboard()
 SUBSCRIBE_MENU_KEYBOARD = {
     "keyboard": [
         [{"text": "Subscribe category"}, {"text": "Remove subscription"}],
-        [{"text": "Browse events"}, {"text": "Show main menu"}],
+        [{"text": "Browse events"}, {"text": "◀️ Home"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+PROFILE_MENU_KEYBOARD = {
+    "keyboard": [
+        [{"text": "Edit Name"}, {"text": "Edit RC"}],
+        [{"text": "❌ Cancel"}, {"text": "◀️ Home"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -160,7 +170,7 @@ def _build_rc_picker_keyboard() -> dict[str, Any]:
             row.append({"text": ALLOWED_RCS[i + 1]})
         rows.append(row)
 
-    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    rows.append([{"text": "❌ Cancel"}, {"text": "◀️ Home"}])
     return {
         "keyboard": rows,
         "resize_keyboard": True,
@@ -179,7 +189,7 @@ def _build_audience_picker_keyboard() -> dict[str, Any]:
             row.append({"text": ALLOWED_RCS[i + 1]})
         rows.append(row)
 
-    rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+    rows.append([{"text": "❌ Cancel"}, {"text": "◀️ Home"}])
     return {
         "keyboard": rows,
         "resize_keyboard": True,
@@ -199,6 +209,12 @@ def display_name(user: dict[str, Any]) -> str:
 
 def handle_text_or_command(text: str) -> str:
     normalized = text.strip().lower()
+
+    if normalized.startswith("◀") or normalized.startswith("⬅"):
+        return "/menu"
+    if normalized.startswith("❌"):
+        return "/cancel"
+
     if normalized in BUTTON_TO_COMMAND:
         return BUTTON_TO_COMMAND[normalized]
     if normalized.startswith("/"):
@@ -211,6 +227,71 @@ def _category_from_text(text: str) -> str | None:
     if value == "view all":
         return "all"
     return CATEGORY_NAME_TO_KEY.get(value)
+
+
+def _audience_label(value: str | None) -> str:
+    if not value:
+        return "-"
+    lowered = value.strip().lower()
+    if lowered in {"all", "all_rc", "all rcs", "everyone"}:
+        return "ALL RCS"
+    canonical = ALLOWED_RCS_MAP.get(lowered, value.strip())
+    return canonical.upper()
+
+
+def _profile_summary(profile: dict[str, Any] | None) -> str:
+    name = profile["effective_display_name"] if profile else "-"
+    rc_name = _audience_label(profile.get("rc_name") if profile else None)
+    return f"NAME: {name}\nRC: {rc_name}"
+
+
+def _event_text(event: dict[str, Any], participants: list[dict[str, Any]], is_creator: bool) -> str:
+    participant_lines: list[str] = []
+    for p in participants:
+        if is_creator:
+            handle = f"@{p['telegram_handle']}" if p.get("telegram_handle") else "(no handle)"
+            participant_lines.append(f"- {p['display_name']} {handle}")
+        else:
+            participant_lines.append(f"- {p['display_name']}")
+
+    creator_handle = f"@{event['creator_handle']}" if event.get("creator_handle") else "(no handle)"
+    capacity = event.get("capacity")
+    participant_count = len(participants)
+    if capacity is None:
+        limit_line = f"PARTICIPANT LIMIT: NO LIMIT ({participant_count} joined)"
+    else:
+        remaining = max(capacity - participant_count, 0)
+        limit_line = f"PARTICIPANT LIMIT: {participant_count}/{capacity} ({remaining} spots left)"
+
+    return (
+        f"📌 {event['title']}\n"
+        f"CATEGORY: {category_label(event['category']).upper()}\n"
+        f"AUDIENCE: {_audience_label(event['target_audience'])}\n"
+        f"TIME: {repository.format_dt(event['start_at'])}\n"
+        f"LOCATION: {event['location_text']}\n"
+        f"CREATOR: {event['creator_name']} {creator_handle}\n"
+        f"{limit_line}\n"
+        f"DESCRIPTION: {event['description']}\n\n"
+        f"PARTICIPANTS ({participant_count}):\n"
+        + ("\n".join(participant_lines) if participant_lines else "- No participants yet")
+    )
+
+
+async def _send_event_detail(chat_id: int, event_id: str, viewer_user_id: str) -> None:
+    event = repository.get_event(event_id)
+    if not event:
+        await send_message(chat_id, "Event not found.")
+        return
+
+    participants = repository.get_event_participants(event_id)
+    is_creator = event["creator_user_id"] == viewer_user_id
+    text = _event_text(event, participants, is_creator)
+
+    keyboard: list[list[dict[str, str]]] = []
+    if not is_creator:
+        keyboard.append([{"text": "Join Event", "callback_data": f"jn:{event['id']}"}])
+    keyboard.append([{"text": "Subscribe Category", "callback_data": f"subc:{event['category']}"}])
+    await send_message(chat_id, text, {"inline_keyboard": keyboard})
 
 
 def category_buttons() -> list[list[dict[str, str]]]:
@@ -267,7 +348,7 @@ async def process_update(update: dict[str, Any]) -> None:
         await send_message(chat["id"], "Please set your RC first.", RC_PICKER_KEYBOARD)
         return
 
-    if command in {"cancel action", "cancel"}:
+    if command in {"/cancel", "cancel action", "cancel"}:
         _clear_user_flow(user_id)
         await send_message(chat["id"], "Action cancelled.", MAIN_MENU_KEYBOARD)
         return
@@ -440,7 +521,8 @@ async def _handle_create(chat_id: int, user_id: str, text: str) -> None:
         capacity=capacity,
     )
     await _notify_category_subscribers_for_event(event)
-    await send_message(chat_id, f"Event created: {event['title']}", CREATED_FLOW_KEYBOARD)
+    await send_message(chat_id, f"✅ Event created: {event['title']}", CREATED_FLOW_KEYBOARD)
+    await _send_event_detail(chat_id, str(event["id"]), user_id)
 
 
 async def _handle_edit(chat_id: int, user_id: str, text: str) -> None:
@@ -489,21 +571,28 @@ async def _continue_onboarding_flow(chat_id: int, user_id: str, text: str) -> No
         return
     repository.set_profile(user_id, None, canonical)
     ONBOARDING_FLOWS.pop(user_id, None)
-    await send_message(chat_id, f"Great — RC set to {canonical}.", MAIN_MENU_KEYBOARD)
+    profile = repository.get_profile(user_id)
+    await send_message(
+        chat_id,
+        (
+            "✅ Profile setup complete.\n"
+            f"{_profile_summary(profile)}\n\n"
+            "If you want to change your name later, open Profile."
+        ),
+        MAIN_MENU_KEYBOARD,
+    )
 
 
 async def _start_profile_flow(chat_id: int, user_id: str) -> None:
     profile = repository.get_profile(user_id)
-    PROFILE_FLOWS[user_id] = {"step": "name"}
+    PROFILE_FLOWS[user_id] = {"step": "menu"}
     await send_message(
         chat_id,
         (
-            f"Current profile:\n"
-            f"Name: {profile['effective_display_name'] if profile else '-'}\n"
-            f"RC: {profile.get('rc_name') if profile else '-'}\n\n"
-            f"Step 1/2: Enter preferred name (or type 'skip')."
+            f"Current profile:\n{_profile_summary(profile)}\n\n"
+            "Choose what to edit."
         ),
-        FLOW_ACTIONS_KEYBOARD,
+        PROFILE_MENU_KEYBOARD,
     )
 
 
@@ -517,10 +606,29 @@ async def _continue_profile_flow(chat_id: int, user_id: str, text: str) -> None:
         await send_message(chat_id, "Please enter a value.", FLOW_ACTIONS_KEYBOARD)
         return
 
+    if state["step"] == "menu":
+        choice = value.lower()
+        if choice == "edit name":
+            state["step"] = "name"
+            await send_message(chat_id, "Enter your new display name.", FLOW_ACTIONS_KEYBOARD)
+            return
+        if choice == "edit rc":
+            state["step"] = "rc"
+            await send_message(chat_id, "Pick your RC.", RC_PICKER_KEYBOARD)
+            return
+        await send_message(chat_id, "Choose one option from the keyboard.", PROFILE_MENU_KEYBOARD)
+        return
+
+    profile = repository.get_profile(user_id)
+    current_name = profile.get("custom_display_name") if profile else None
+    current_rc = profile.get("rc_name") if profile else None
+
     if state["step"] == "name":
-        state["name"] = None if value.lower() in {"skip", "none"} else value[:80]
-        state["step"] = "rc"
-        await send_message(chat_id, "Step 2/2: Pick your RC.", RC_PICKER_KEYBOARD)
+        updated_name = value[:80]
+        repository.set_profile(user_id, updated_name, current_rc)
+        PROFILE_FLOWS.pop(user_id, None)
+        updated = repository.get_profile(user_id)
+        await send_message(chat_id, f"✅ Profile updated.\n{_profile_summary(updated)}", MAIN_MENU_KEYBOARD)
         return
 
     if state["step"] == "rc":
@@ -528,11 +636,11 @@ async def _continue_profile_flow(chat_id: int, user_id: str, text: str) -> None:
         if not canonical:
             await send_message(chat_id, "Please pick one RC from the keyboard.", RC_PICKER_KEYBOARD)
             return
-        repository.set_profile(user_id, state.get("name"), canonical)
+        repository.set_profile(user_id, current_name, canonical)
         PROFILE_FLOWS.pop(user_id, None)
-        await send_message(chat_id, f"Profile updated. RC: {canonical}", MAIN_MENU_KEYBOARD)
+        updated = repository.get_profile(user_id)
+        await send_message(chat_id, f"✅ Profile updated.\n{_profile_summary(updated)}", MAIN_MENU_KEYBOARD)
         return
-
 
 async def _start_subscribe_flow(chat_id: int, user_id: str) -> None:
     categories = repository.list_category_subscriptions(user_id)
@@ -575,7 +683,7 @@ async def _continue_subscribe_flow(chat_id: int, user_id: str, text: str) -> Non
                 if i + 1 < len(labels):
                     row.append({"text": labels[i + 1]})
                 rows.append(row)
-            rows.append([{"text": "Cancel action"}, {"text": "Show main menu"}])
+            rows.append([{"text": "❌ Cancel"}, {"text": "◀️ Home"}])
             state["step"] = "remove_pick"
             state["removable_categories"] = categories
             await send_message(
@@ -728,7 +836,8 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
         )
         await _notify_category_subscribers_for_event(event)
         CREATE_FLOWS.pop(user_id, None)
-        await send_message(chat_id, f"Event created: {event['title']}", CREATED_FLOW_KEYBOARD)
+        await send_message(chat_id, f"✅ Event created: {event['title']}", CREATED_FLOW_KEYBOARD)
+        await _send_event_detail(chat_id, str(event["id"]), user_id)
 
 
 async def _start_edit_flow(chat_id: int, user_id: str) -> None:
@@ -968,6 +1077,9 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
         if ok:
             # Get updated event details
             event = repository.get_event(event_id)
+            if not event:
+                await answer_callback_query(query["id"], "✅ Joined!")
+                return
             participants = repository.get_event_participants(event_id)
             is_creator = event["creator_user_id"] == user["id"]
             
@@ -1024,7 +1136,7 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
             # Show a brief popup that they joined
             await answer_callback_query(query["id"], "✅ Joined!")
         else:
-            await answer_callback_query(query["id"], "❌ Failed to join")
+            await answer_callback_query(query["id"], "❌ Cancel Failed to join")
             await send_message(chat["id"], msg)
         return
 
@@ -1096,7 +1208,7 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
             
             await answer_callback_query(query["id"], "✅ Left event!")
         else:
-            await answer_callback_query(query["id"], "❌ Failed to leave")
+            await answer_callback_query(query["id"], "❌ Cancel Failed to leave")
             await send_message(chat["id"], msg)
         return
     
@@ -1111,13 +1223,35 @@ async def _send_event_list(chat_id: int, category: str, page: int, viewer_rc: st
         await send_message(chat_id, "No events found.")
         return
 
-    lines = ["Available events:"]
+    lines: list[str] = []
     keyboard: list[list[dict[str, str]]] = []
-    for event in rows:
-        lines.append(
-            f"- {event['title']} | {category_label(event['category'])} | {repository.format_dt(event['start_at'])}"
-        )
-        keyboard.append([{ "text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}" }])
+
+    if category == "all":
+        lines = ["📂 VIEW: ALL CATEGORIES", "Tap an event to open:"]
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event in rows:
+            grouped.setdefault(event["category"], []).append(event)
+
+        category_order = [key for key in CATEGORY_KEYS if key in grouped]
+        category_order.extend([key for key in grouped.keys() if key not in category_order])
+
+        for cat_key in category_order:
+            lines.append("")
+            lines.append(f"— {category_label(cat_key).upper()} —")
+            for idx, event in enumerate(grouped[cat_key], start=1):
+                limit = "No limit" if event.get("capacity") is None else f"{event.get('participant_count', 0)}/{event.get('capacity')}"
+                lines.append(
+                    f"{idx}. {event['title']} | {repository.format_dt(event['start_at'])} | LIMIT {limit}"
+                )
+                keyboard.append([{"text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}"}])
+    else:
+        lines = [f"📂 CATEGORY: {category_label(category).upper()}", "Tap an event to open:"]
+        for idx, event in enumerate(rows, start=1):
+            limit = "No limit" if event.get("capacity") is None else f"{event.get('participant_count', 0)}/{event.get('capacity')}"
+            lines.append(
+                f"{idx}. {event['title']} | {repository.format_dt(event['start_at'])} | LIMIT {limit}"
+            )
+            keyboard.append([{"text": f"Open: {event['title'][:25]}", "callback_data": f"evt:{event['id']}"}])
 
     if len(rows) == repository.PAGE_SIZE:
         keyboard.append([{ "text": "Next", "callback_data": f"cat:{category}:{page + 1}" }])
