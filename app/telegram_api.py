@@ -42,15 +42,35 @@ async def answer_callback_query(callback_query_id: str, text: str | None = None)
     await _get_client().post(f"{BASE_URL}/answerCallbackQuery", json=payload)
 
 
-async def edit_message_text(chat_id: int, message_id: int, text: str, reply_markup: dict[str, Any] | None = None) -> None:
-    """Edit an existing message instead of sending a new one"""
+async def edit_message_text(
+    text: str,
+    chat_id: int | None = None,
+    message_id: int | None = None,
+    inline_message_id: str | None = None,
+    reply_markup: dict[str, Any] | None = None,
+) -> None:
+    """Edit an existing message in a chat or an inline-shared message."""
     payload: dict[str, Any] = {
-        "chat_id": chat_id,
-        "message_id": message_id,
         "text": text,
         "disable_web_page_preview": True,
     }
+    if inline_message_id:
+        payload["inline_message_id"] = inline_message_id
+    else:
+        if chat_id is None or message_id is None:
+            return
+        payload["chat_id"] = chat_id
+        payload["message_id"] = message_id
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
 
     await _get_client().post(f"{BASE_URL}/editMessageText", json=payload)
+
+
+async def answer_inline_query(inline_query_id: str, results: list[dict[str, Any]], cache_time: int = 0) -> None:
+    payload: dict[str, Any] = {
+        "inline_query_id": inline_query_id,
+        "results": results,
+        "cache_time": cache_time,
+    }
+    await _get_client().post(f"{BASE_URL}/answerInlineQuery", json=payload)

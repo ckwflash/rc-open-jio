@@ -11,6 +11,8 @@ drop trigger if exists users_set_updated_at on users;
 drop function if exists set_updated_at();
 
 drop table if exists notification_outbox cascade;
+drop table if exists event_shared_messages cascade;
+drop table if exists bot_user_flows cascade;
 drop table if exists event_subscriptions cascade;
 drop table if exists event_participants cascade;
 drop table if exists events cascade;
@@ -146,12 +148,32 @@ create table notification_outbox (
   sent_at timestamptz
 );
 
+create table bot_user_flows (
+  id bigserial primary key,
+  user_id uuid not null references users(id) on delete cascade,
+  flow_type text not null,
+  state jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now(),
+  expires_at timestamptz not null default (now() + interval '2 hours'),
+  unique (user_id, flow_type)
+);
+
+create table event_shared_messages (
+  id bigserial primary key,
+  event_id uuid not null references events(id) on delete cascade,
+  inline_message_id text not null unique,
+  created_at timestamptz not null default now()
+);
+
 create index events_start_at_idx on events(start_at);
 create index events_category_start_at_idx on events(category, start_at);
 create index events_creator_created_at_idx on events(creator_user_id, created_at desc);
 create index event_participants_user_joined_idx on event_participants(user_id, joined_at desc);
 create index event_participants_event_status_idx on event_participants(event_id, status);
 create index notification_outbox_status_schedule_idx on notification_outbox(status, scheduled_for);
+create index bot_user_flows_user_expires_idx on bot_user_flows(user_id, expires_at desc);
+create index bot_user_flows_expires_idx on bot_user_flows(expires_at);
+create index event_shared_messages_event_idx on event_shared_messages(event_id, created_at desc);
 
 create or replace function set_updated_at()
 returns trigger as $$

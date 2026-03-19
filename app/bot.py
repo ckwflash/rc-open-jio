@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.constants import ALLOWED_RCS, ALLOWED_RCS_MAP, CATEGORY_KEYS, CATEGORY_NAME_TO_KEY, category_label
 from app import repository
-from app.telegram_api import answer_callback_query, send_message, edit_message_text
+from app.telegram_api import answer_callback_query, answer_inline_query, send_message, edit_message_text
 
 
 MAIN_MENU_TEXT = (
@@ -57,12 +57,24 @@ BUTTON_TO_COMMAND = {
     "❌ cancel": "/cancel",
 }
 
-CREATE_FLOWS: dict[str, dict[str, Any]] = {}
-EDIT_FLOWS: dict[str, dict[str, Any]] = {}
-DELETE_FLOWS: dict[str, dict[str, Any]] = {}
-PROFILE_FLOWS: dict[str, dict[str, Any]] = {}
-ONBOARDING_FLOWS: dict[str, dict[str, Any]] = {}
-SUBSCRIBE_FLOWS: dict[str, dict[str, Any]] = {}
+FLOW_ONBOARDING = "onboarding"
+FLOW_CREATE = "create"
+FLOW_EDIT = "edit"
+FLOW_DELETE = "delete"
+FLOW_PROFILE = "profile"
+FLOW_SUBSCRIBE = "subscribe"
+
+
+def _set_flow_state(user_id: str, flow_type: str, state: dict[str, Any]) -> None:
+    repository.set_user_flow_state(user_id, flow_type, state)
+
+
+def _get_flow_state(user_id: str, flow_type: str) -> dict[str, Any] | None:
+    return repository.get_user_flow_state(user_id, flow_type)
+
+
+def _clear_flow_state(user_id: str, flow_type: str) -> None:
+    repository.clear_user_flow_state(user_id, flow_type)
 
 FLOW_ACTIONS_KEYBOARD = {
     "keyboard": [
@@ -247,10 +259,15 @@ def _profile_summary(profile: dict[str, Any] | None) -> str:
     return f"NAME: {name}\nRC: {rc_name}"
 
 
-def _event_text(event: dict[str, Any], participants: list[dict[str, Any]], is_creator: bool) -> str:
+def _event_text(
+    event: dict[str, Any],
+    participants: list[dict[str, Any]],
+    is_creator: bool,
+    include_participant_handles: bool = False,
+) -> str:
     participant_lines: list[str] = []
     for p in participants:
-        if is_creator:
+        if is_creator and include_participant_handles:
             handle = f"@{p['telegram_handle']}" if p.get("telegram_handle") else "(no handle)"
             participant_lines.append(f"- {p['display_name']} {handle}")
         else:
@@ -279,6 +296,117 @@ def _event_text(event: dict[str, Any], participants: list[dict[str, Any]], is_cr
     )
 
 
+def _share_query_for_event(event: dict[str, Any]) -> str:
+    event_id = str(event.get("id") or "").strip()
+    return f"evt:{event_id}" if event_id else ""
+
+
+def _build_event_inline_keyboard(event: dict[str, Any], has_joined: bool, is_creator: bool) -> list[list[dict[str, str]]]:
+    rows: list[list[dict[str, str]]] = []
+    event_id = str(event["id"])
+
+    if not is_creator:
+        if has_joined:
+            rows.append([{"text": "Leave Event", "callback_data": f"leave:{event_id}"}])
+        else:
+            rows.append([{"text": "Join Event", "callback_data": f"jn:{event_id}"}])
+
+    rows.append([{"text": "Share Event", "switch_inline_query": _share_query_for_event(event)}])
+    return rows
+
+
+async def _edit_callback_message(
+    query: dict[str, Any],
+    text: str,
+    reply_markup: dict[str, Any] | None = None,
+) -> None:
+    message = query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    inline_message_id = query.get("inline_message_id")
+    await edit_message_text(
+        text=text,
+        chat_id=chat_id,
+        message_id=message_id,
+        inline_message_id=inline_message_id,
+        reply_markup=reply_markup,
+    )
+
+
+def _build_inline_event_result(
+    event: dict[str, Any],
+    participants: list[dict[str, Any]],
+) -> dict[str, Any]:
+    event_payload = dict(event)
+    event_payload.setdefault("creator_name", "Event Creator")
+    event_payload.setdefault("creator_handle", None)
+    message_text = _event_text(
+        event_payload,
+        participants,
+        is_creator=False,
+        include_participant_handles=False,
+    )
+    return {
+        "type": "article",
+        "id": f"evt:{event['id']}",
+        "title": event["title"],
+        "description": f"{category_label(event['category'])} • {repository.format_dt(event['start_at'])}",
+        "input_message_content": {
+            "message_text": message_text,
+            "disable_web_page_preview": True,
+        },
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "Join Event", "callback_data": f"jn:{event['id']}"},
+                {"text": "Leave Event", "callback_data": f"leave:{event['id']}"},
+            ], [
+                {"text": "Share Event", "switch_inline_query": _share_query_for_event(event)},
+            ]]
+        },
+    }
+
+
+def _build_shared_event_reply_markup(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Join Event", "callback_data": f"jn:{event['id']}"},
+                {"text": "Leave Event", "callback_data": f"leave:{event['id']}"},
+            ],
+            [
+                {"text": "Share Event", "switch_inline_query": _share_query_for_event(event)},
+            ],
+        ]
+    }
+
+
+async def _refresh_shared_event_messages(event_id: str) -> None:
+    event = repository.get_event(event_id)
+    if not event:
+        return
+    participants = repository.get_event_participants(event_id)
+    text = _event_text(event, participants, is_creator=False, include_participant_handles=False)
+    reply_markup = _build_shared_event_reply_markup(event)
+    inline_ids = repository.list_shared_event_message_ids(event_id)
+    for inline_message_id in inline_ids:
+        await edit_message_text(
+            text=text,
+            inline_message_id=inline_message_id,
+            reply_markup=reply_markup,
+        )
+
+
+async def _handle_chosen_inline_result(chosen: dict[str, Any]) -> None:
+    result_id = str(chosen.get("result_id") or "")
+    inline_message_id = str(chosen.get("inline_message_id") or "")
+    if not result_id.startswith("evt:") or not inline_message_id:
+        return
+    event_id = result_id[4:]
+    if not event_id:
+        return
+    repository.register_shared_event_message(event_id, inline_message_id)
+
+
 async def _send_event_detail(chat_id: int, event_id: str, viewer_user_id: str) -> None:
     event = repository.get_event(event_id)
     if not event:
@@ -287,13 +415,82 @@ async def _send_event_detail(chat_id: int, event_id: str, viewer_user_id: str) -
 
     participants = repository.get_event_participants(event_id)
     is_creator = event["creator_user_id"] == viewer_user_id
-    text = _event_text(event, participants, is_creator)
+    text = _event_text(event, participants, is_creator, include_participant_handles=is_creator)
 
-    keyboard: list[list[dict[str, str]]] = []
-    if not is_creator:
-        keyboard.append([{"text": "Join Event", "callback_data": f"jn:{event['id']}"}])
-    keyboard.append([{"text": "Subscribe Category", "callback_data": f"subc:{event['category']}"}])
-    await send_message(chat_id, text, {"inline_keyboard": keyboard})
+    participant_ids = {p["user_id"] for p in participants}
+    has_joined = viewer_user_id in participant_ids
+    keyboard = _build_event_inline_keyboard(event, has_joined=has_joined, is_creator=is_creator)
+    if keyboard:
+        await send_message(chat_id, text, {"inline_keyboard": keyboard})
+    else:
+        await send_message(chat_id, text)
+
+
+async def _handle_inline_query(inline_query: dict[str, Any]) -> None:
+    query_id = inline_query.get("id")
+    from_user = inline_query.get("from") or {}
+    query_text = (inline_query.get("query") or "").strip()
+    if not query_id or not from_user:
+        return
+
+    user = repository.upsert_user(
+        telegram_user_id=from_user["id"],
+        telegram_handle=from_user.get("username"),
+        display_name=display_name(from_user),
+    )
+
+    lowered = query_text.lower()
+    results: list[dict[str, Any]] = []
+    if lowered.startswith("evt:"):
+        event_id = query_text[4:].strip()
+        event = repository.get_event(event_id)
+        if event:
+            participants = repository.get_event_participants(event_id)
+            results.append(_build_inline_event_result(event, participants))
+        await answer_inline_query(query_id, results, cache_time=0)
+        return
+
+    profile = repository.get_profile(user["id"])
+    viewer_rc = profile.get("rc_name") if profile else None
+
+    visible_events = repository.list_events(category=None, page=0, viewer_rc=viewer_rc)
+    created_events = repository.list_created_events(user["id"])
+
+    combined: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for event in created_events + visible_events:
+        event_id = str(event["id"])
+        if event_id in seen_ids:
+            continue
+        seen_ids.add(event_id)
+        combined.append(event)
+
+    for event in combined:
+        event_id = str(event.get("id") or "")
+        haystack = " ".join(
+            [
+                event_id,
+                str(event.get("title") or ""),
+                str(event.get("description") or ""),
+                str(event.get("location_text") or ""),
+                category_label(str(event.get("category") or "")),
+            ]
+        ).lower()
+        if lowered and lowered not in haystack:
+            continue
+
+        event_for_render = event
+        if "creator_name" not in event_for_render:
+            full_event = repository.get_event(event_id)
+            if full_event:
+                event_for_render = full_event
+
+        participants = repository.get_event_participants(str(event["id"]))
+        results.append(_build_inline_event_result(event_for_render, participants))
+        if len(results) >= 20:
+            break
+
+    await answer_inline_query(query_id, results, cache_time=0)
 
 
 def category_buttons() -> list[list[dict[str, str]]]:
@@ -305,6 +502,14 @@ def category_buttons() -> list[list[dict[str, str]]]:
 
 
 async def process_update(update: dict[str, Any]) -> None:
+    if "chosen_inline_result" in update:
+        await _handle_chosen_inline_result(update["chosen_inline_result"])
+        return
+
+    if "inline_query" in update:
+        await _handle_inline_query(update["inline_query"])
+        return
+
     if "callback_query" in update:
         await _handle_callback_query(update["callback_query"])
         return
@@ -333,7 +538,7 @@ async def process_update(update: dict[str, Any]) -> None:
     if command in {"/start", "/menu", "/help"}:
         _clear_user_flow(user_id)
         if not profile or not profile.get("rc_name"):
-            ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+            _set_flow_state(user_id, FLOW_ONBOARDING, {"step": "rc"})
             await send_message(
                 chat["id"],
                 "Welcome to RC Open Jio. First, pick your RC to continue:",
@@ -346,7 +551,7 @@ async def process_update(update: dict[str, Any]) -> None:
     if command in {"/create", "/edit", "/delete", "/list", "/subscribe", "/joined", "/created"} and (
         not profile or not profile.get("rc_name")
     ):
-        ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+        _set_flow_state(user_id, FLOW_ONBOARDING, {"step": "rc"})
         await send_message(chat["id"], "Please set your RC first.", RC_PICKER_KEYBOARD)
         return
 
@@ -367,34 +572,34 @@ async def process_update(update: dict[str, Any]) -> None:
         await _start_delete_flow(chat["id"], user_id)
         return
 
-    if user_id in ONBOARDING_FLOWS:
+    if _get_flow_state(user_id, FLOW_ONBOARDING):
         await _continue_onboarding_flow(chat["id"], user_id, raw_text)
         return
 
-    if user_id in CREATE_FLOWS:
+    if _get_flow_state(user_id, FLOW_CREATE):
         await _continue_create_flow(chat["id"], user_id, raw_text)
         return
 
-    if user_id in EDIT_FLOWS:
+    if _get_flow_state(user_id, FLOW_EDIT):
         await _continue_edit_flow(chat["id"], user_id, raw_text)
         return
 
-    if user_id in DELETE_FLOWS:
+    if _get_flow_state(user_id, FLOW_DELETE):
         await _continue_delete_flow(chat["id"], user_id, raw_text)
         return
 
-    if user_id in PROFILE_FLOWS:
+    if _get_flow_state(user_id, FLOW_PROFILE):
         await _continue_profile_flow(chat["id"], user_id, raw_text)
         return
 
-    if user_id in SUBSCRIBE_FLOWS:
+    if _get_flow_state(user_id, FLOW_SUBSCRIBE):
         await _continue_subscribe_flow(chat["id"], user_id, raw_text)
         return
 
     selected_category = _category_from_text(raw_text)
     if selected_category:
         if not profile or not profile.get("rc_name"):
-            ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+            _set_flow_state(user_id, FLOW_ONBOARDING, {"step": "rc"})
             await send_message(chat["id"], "Set your RC first to browse events.", RC_PICKER_KEYBOARD)
             return
         await _send_event_list(
@@ -411,7 +616,7 @@ async def process_update(update: dict[str, Any]) -> None:
 
     if command == "/list":
         if not profile or not profile.get("rc_name"):
-            ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+            _set_flow_state(user_id, FLOW_ONBOARDING, {"step": "rc"})
             await send_message(chat["id"], "Set your RC first to browse events.", RC_PICKER_KEYBOARD)
             return
         await send_message(
@@ -423,7 +628,7 @@ async def process_update(update: dict[str, Any]) -> None:
 
     if command.startswith("/subscribe"):
         if not profile or not profile.get("rc_name"):
-            ONBOARDING_FLOWS[user_id] = {"step": "rc"}
+            _set_flow_state(user_id, FLOW_ONBOARDING, {"step": "rc"})
             await send_message(chat["id"], "Set your RC first to manage subscriptions.", RC_PICKER_KEYBOARD)
             return
         await _start_subscribe_flow(chat["id"], user_id)
@@ -566,12 +771,7 @@ async def _handle_edit(chat_id: int, user_id: str, text: str) -> None:
 
 
 def _clear_user_flow(user_id: str) -> None:
-    CREATE_FLOWS.pop(user_id, None)
-    EDIT_FLOWS.pop(user_id, None)
-    DELETE_FLOWS.pop(user_id, None)
-    PROFILE_FLOWS.pop(user_id, None)
-    ONBOARDING_FLOWS.pop(user_id, None)
-    SUBSCRIBE_FLOWS.pop(user_id, None)
+    repository.clear_all_user_flow_states(user_id)
 
 
 async def _continue_onboarding_flow(chat_id: int, user_id: str, text: str) -> None:
@@ -581,7 +781,7 @@ async def _continue_onboarding_flow(chat_id: int, user_id: str, text: str) -> No
         await send_message(chat_id, "Please pick one RC from the keyboard.", RC_PICKER_KEYBOARD)
         return
     repository.set_profile(user_id, None, canonical)
-    ONBOARDING_FLOWS.pop(user_id, None)
+    _clear_flow_state(user_id, FLOW_ONBOARDING)
     profile = repository.get_profile(user_id)
     await send_message(
         chat_id,
@@ -596,7 +796,7 @@ async def _continue_onboarding_flow(chat_id: int, user_id: str, text: str) -> No
 
 async def _start_profile_flow(chat_id: int, user_id: str) -> None:
     profile = repository.get_profile(user_id)
-    PROFILE_FLOWS[user_id] = {"step": "menu"}
+    _set_flow_state(user_id, FLOW_PROFILE, {"step": "menu"})
     await send_message(
         chat_id,
         (
@@ -608,7 +808,7 @@ async def _start_profile_flow(chat_id: int, user_id: str) -> None:
 
 
 async def _continue_profile_flow(chat_id: int, user_id: str, text: str) -> None:
-    state = PROFILE_FLOWS.get(user_id)
+    state = _get_flow_state(user_id, FLOW_PROFILE)
     if not state:
         return
 
@@ -621,10 +821,12 @@ async def _continue_profile_flow(chat_id: int, user_id: str, text: str) -> None:
         choice = value.lower()
         if choice == "edit name":
             state["step"] = "name"
+            _set_flow_state(user_id, FLOW_PROFILE, state)
             await send_message(chat_id, "Enter your new display name.", FLOW_ACTIONS_KEYBOARD)
             return
         if choice == "edit rc":
             state["step"] = "rc"
+            _set_flow_state(user_id, FLOW_PROFILE, state)
             await send_message(chat_id, "Pick your RC.", RC_PICKER_KEYBOARD)
             return
         await send_message(chat_id, "Choose one option from the keyboard.", PROFILE_MENU_KEYBOARD)
@@ -637,7 +839,7 @@ async def _continue_profile_flow(chat_id: int, user_id: str, text: str) -> None:
     if state["step"] == "name":
         updated_name = value[:80]
         repository.set_profile(user_id, updated_name, current_rc)
-        PROFILE_FLOWS.pop(user_id, None)
+        _clear_flow_state(user_id, FLOW_PROFILE)
         updated = repository.get_profile(user_id)
         await send_message(chat_id, f"✅ Profile updated.\n{_profile_summary(updated)}", MAIN_MENU_KEYBOARD)
         return
@@ -648,7 +850,7 @@ async def _continue_profile_flow(chat_id: int, user_id: str, text: str) -> None:
             await send_message(chat_id, "Please pick one RC from the keyboard.", RC_PICKER_KEYBOARD)
             return
         repository.set_profile(user_id, current_name, canonical)
-        PROFILE_FLOWS.pop(user_id, None)
+        _clear_flow_state(user_id, FLOW_PROFILE)
         updated = repository.get_profile(user_id)
         await send_message(chat_id, f"✅ Profile updated.\n{_profile_summary(updated)}", MAIN_MENU_KEYBOARD)
         return
@@ -663,13 +865,13 @@ async def _start_subscribe_flow(chat_id: int, user_id: str) -> None:
         lines.append("- (none)")
 
     lines.append("\nChoose an action below.")
-    SUBSCRIBE_FLOWS[user_id] = {"step": "menu"}
+    _set_flow_state(user_id, FLOW_SUBSCRIBE, {"step": "menu"})
     await send_message(chat_id, "\n".join(lines), SUBSCRIBE_MENU_KEYBOARD)
 
 
 async def _continue_subscribe_flow(chat_id: int, user_id: str, text: str) -> None:
     value = text.strip()
-    state = SUBSCRIBE_FLOWS.get(user_id)
+    state = _get_flow_state(user_id, FLOW_SUBSCRIBE)
     if not state:
         return
 
@@ -679,6 +881,7 @@ async def _continue_subscribe_flow(chat_id: int, user_id: str, text: str) -> Non
         lower = value.lower()
         if lower == "subscribe category":
             state["step"] = "subscribe_pick"
+            _set_flow_state(user_id, FLOW_SUBSCRIBE, state)
             await send_message(chat_id, "Pick a category to subscribe:", SUBSCRIBE_CATEGORY_KEYBOARD)
             return
         if lower == "remove subscription":
@@ -697,6 +900,7 @@ async def _continue_subscribe_flow(chat_id: int, user_id: str, text: str) -> Non
             rows.append([{"text": "❌ Cancel"}, {"text": "◀️ Home"}])
             state["step"] = "remove_pick"
             state["removable_categories"] = categories
+            _set_flow_state(user_id, FLOW_SUBSCRIBE, state)
             await send_message(
                 chat_id,
                 "Pick a category to remove:",
@@ -732,16 +936,16 @@ async def _continue_subscribe_flow(chat_id: int, user_id: str, text: str) -> Non
         return
 
     await send_message(chat_id, "Subscription action ended.", LIST_FLOW_KEYBOARD)
-    SUBSCRIBE_FLOWS.pop(user_id, None)
+    _clear_flow_state(user_id, FLOW_SUBSCRIBE)
 
 
 async def _start_create_flow(chat_id: int, user_id: str) -> None:
-    CREATE_FLOWS[user_id] = {"step": "title", "data": {}}
+    _set_flow_state(user_id, FLOW_CREATE, {"step": "title", "data": {}})
     await send_message(chat_id, "Creating event (1/7): Enter event title.", FLOW_ACTIONS_KEYBOARD)
 
 
 async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
-    state = CREATE_FLOWS.get(user_id)
+    state = _get_flow_state(user_id, FLOW_CREATE)
     if not state:
         return
 
@@ -756,6 +960,7 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
     if step == "title":
         data["title"] = value
         state["step"] = "category"
+        _set_flow_state(user_id, FLOW_CREATE, state)
         await send_message(
             chat_id,
             "Creating event (2/7): Pick a category from the options below.",
@@ -770,6 +975,7 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
             return
         data["category"] = key
         state["step"] = "target_audience"
+        _set_flow_state(user_id, FLOW_CREATE, state)
         await send_message(
             chat_id,
             "Creating event (3/7): Pick target audience.",
@@ -787,6 +993,7 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
                 return
             data["target_audience"] = canonical
         state["step"] = "start_at"
+        _set_flow_state(user_id, FLOW_CREATE, state)
         await send_message(
             chat_id,
             f"Creating event (4/7): Enter start date/time in {settings.default_timezone} as YYYY-MM-DD HH:MM",
@@ -803,12 +1010,14 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
             await send_message(chat_id, "Invalid datetime format. Use YYYY-MM-DD HH:MM", FLOW_ACTIONS_KEYBOARD)
             return
         state["step"] = "location"
+        _set_flow_state(user_id, FLOW_CREATE, state)
         await send_message(chat_id, "Creating event (5/7): Enter location.", FLOW_ACTIONS_KEYBOARD)
         return
 
     if step == "location":
         data["location_text"] = value
         state["step"] = "capacity"
+        _set_flow_state(user_id, FLOW_CREATE, state)
         await send_message(
             chat_id,
             "Creating event (6/7): Enter capacity number, or type 'none' for no limit.",
@@ -830,6 +1039,7 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
                 await send_message(chat_id, "Capacity must be a positive number, or 'none'.", FLOW_ACTIONS_KEYBOARD)
                 return
         state["step"] = "description"
+        _set_flow_state(user_id, FLOW_CREATE, state)
         await send_message(chat_id, "Creating event (7/7): Enter description.", FLOW_ACTIONS_KEYBOARD)
         return
 
@@ -846,7 +1056,7 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
             capacity=data["capacity"],
         )
         await _notify_category_subscribers_for_event(event)
-        CREATE_FLOWS.pop(user_id, None)
+        _clear_flow_state(user_id, FLOW_CREATE)
         await send_message(chat_id, f"✅ Event created: {event['title']}", CREATED_FLOW_KEYBOARD)
         await _send_event_detail(chat_id, str(event["id"]), user_id)
 
@@ -863,12 +1073,12 @@ async def _start_edit_flow(chat_id: int, user_id: str) -> None:
         index_map[str(idx)] = str(row["id"])
         lines.append(f"{idx}. {row['title']} ({repository.format_dt(row['start_at'])})")
 
-    EDIT_FLOWS[user_id] = {"step": "event_index", "data": {}, "index_map": index_map}
+    _set_flow_state(user_id, FLOW_EDIT, {"step": "event_index", "data": {}, "index_map": index_map})
     await send_message(chat_id, "\n".join(lines), FLOW_ACTIONS_KEYBOARD)
 
 
 async def _continue_edit_flow(chat_id: int, user_id: str, text: str) -> None:
-    state = EDIT_FLOWS.get(user_id)
+    state = _get_flow_state(user_id, FLOW_EDIT)
     if not state:
         return
 
@@ -887,6 +1097,7 @@ async def _continue_edit_flow(chat_id: int, user_id: str, text: str) -> None:
             return
         data["event_id"] = event_id
         state["step"] = "field_choice"
+        _set_flow_state(user_id, FLOW_EDIT, state)
         await send_message(
             chat_id,
             "Editing event (2/3): Choose what to edit.",
@@ -911,6 +1122,7 @@ async def _continue_edit_flow(chat_id: int, user_id: str, text: str) -> None:
             return
         data["field"] = selected
         state["step"] = "field_value"
+        _set_flow_state(user_id, FLOW_EDIT, state)
 
         if selected == "category":
             await send_message(chat_id, "Step 3/3: Pick a new category.", CATEGORY_PICKER_KEYBOARD)
@@ -979,7 +1191,7 @@ async def _continue_edit_flow(chat_id: int, user_id: str, text: str) -> None:
                     return
         else:
             await send_message(chat_id, "Invalid edit field. Start again with /edit.", CREATED_FLOW_KEYBOARD)
-            EDIT_FLOWS.pop(user_id, None)
+            _clear_flow_state(user_id, FLOW_EDIT)
             return
 
         ok, msg = repository.edit_event_fields(
@@ -987,7 +1199,7 @@ async def _continue_edit_flow(chat_id: int, user_id: str, text: str) -> None:
             event_id=data["event_id"],
             **kwargs,
         )
-        EDIT_FLOWS.pop(user_id, None)
+        _clear_flow_state(user_id, FLOW_EDIT)
         await send_message(chat_id, msg if ok else f"Unable to edit event: {msg}", CREATED_FLOW_KEYBOARD)
 
 
@@ -1003,12 +1215,12 @@ async def _start_delete_flow(chat_id: int, user_id: str) -> None:
         index_map[str(idx)] = str(row["id"])
         lines.append(f"{idx}. {row['title']} ({repository.format_dt(row['start_at'])})")
 
-    DELETE_FLOWS[user_id] = {"step": "event_index", "data": {}, "index_map": index_map}
+    _set_flow_state(user_id, FLOW_DELETE, {"step": "event_index", "data": {}, "index_map": index_map})
     await send_message(chat_id, "\n".join(lines), FLOW_ACTIONS_KEYBOARD)
 
 
 async def _continue_delete_flow(chat_id: int, user_id: str, text: str) -> None:
-    state = DELETE_FLOWS.get(user_id)
+    state = _get_flow_state(user_id, FLOW_DELETE)
     if not state:
         return
 
@@ -1029,12 +1241,13 @@ async def _continue_delete_flow(chat_id: int, user_id: str, text: str) -> None:
         event = repository.get_event(event_id)
         if not event:
             await send_message(chat_id, "Event not found.", CREATED_FLOW_KEYBOARD)
-            DELETE_FLOWS.pop(user_id, None)
+            _clear_flow_state(user_id, FLOW_DELETE)
             return
         
         data["event_id"] = event_id
         data["event_title"] = event["title"]
         state["step"] = "confirm"
+        _set_flow_state(user_id, FLOW_DELETE, state)
         await send_message(
             chat_id,
             f"⚠️ Are you sure you want to delete '{event['title']}'?\n\nAll participants will lose access to this event and reminders will be cancelled.\n\nType 'yes' to confirm or 'no' to cancel.",
@@ -1044,7 +1257,7 @@ async def _continue_delete_flow(chat_id: int, user_id: str, text: str) -> None:
 
     if step == "confirm":
         if value.lower() not in {"yes", "y"}:
-            DELETE_FLOWS.pop(user_id, None)
+            _clear_flow_state(user_id, FLOW_DELETE)
             await send_message(chat_id, f"Deletion of '{data.get('event_title')}' cancelled.", CREATED_FLOW_KEYBOARD)
             return
 
@@ -1052,7 +1265,7 @@ async def _continue_delete_flow(chat_id: int, user_id: str, text: str) -> None:
             creator_user_id=user_id,
             event_id=data["event_id"],
         )
-        DELETE_FLOWS.pop(user_id, None)
+        _clear_flow_state(user_id, FLOW_DELETE)
         await send_message(chat_id, msg if ok else f"Unable to delete event: {msg}", CREATED_FLOW_KEYBOARD)
 
 
@@ -1062,7 +1275,7 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
     message = query.get("message") or {}
     chat = message.get("chat") or {}
 
-    if not from_user or not chat:
+    if not from_user:
         return
 
     user = repository.upsert_user(
@@ -1074,8 +1287,10 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
 
     if data.startswith("cat:"):
         await answer_callback_query(query["id"])
+        if not chat:
+            return
         if not profile or not profile.get("rc_name"):
-            ONBOARDING_FLOWS[user["id"]] = {"step": "rc"}
+            _set_flow_state(user["id"], FLOW_ONBOARDING, {"step": "rc"})
             await send_message(chat["id"], "Set your RC first to browse events.", RC_PICKER_KEYBOARD)
             return
         _, category, page_s = data.split(":", 2)
@@ -1090,6 +1305,8 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
 
     if data.startswith("evt:"):
         await answer_callback_query(query["id"])
+        if not chat:
+            return
         event_id = data.split(":", 1)[1]
         event = repository.get_event(event_id)
         if not event:
@@ -1097,205 +1314,113 @@ async def _handle_callback_query(query: dict[str, Any]) -> None:
             return
 
         participants = repository.get_event_participants(event_id)
-        participant_ids = [p['user_id'] for p in participants]
-        has_joined = user['id'] in participant_ids
+        participant_ids = {p["user_id"] for p in participants}
+        has_joined = user["id"] in participant_ids
 
         is_creator = event["creator_user_id"] == user["id"]
 
-        participant_lines = []
-        for p in participants:
-            if is_creator:
-                handle = f"@{p['telegram_handle']}" if p.get("telegram_handle") else "(no handle)"
-                participant_lines.append(f"- {p['display_name']} {handle}")
-            else:
-                participant_lines.append(f"- {p['display_name']}")
-
-        creator_handle = f"@{event['creator_handle']}" if event.get("creator_handle") else "(no handle)"
-
-        text = (
-            f"{event['title']}\n"
-            f"Category: {category_label(event['category'])}\n"
-            f"Audience: {event['target_audience']}\n"
-            f"Time: {repository.format_dt(event['start_at'])}\n"
-            f"Location: {event['location_text']}\n"
-            f"Creator: {event['creator_name']} {creator_handle}\n"
-            f"Description: {event['description']}\n\n"
-            f"Participants ({len(participants)}):\n"
-            + ("\n".join(participant_lines) if participant_lines else "- No participants yet")
-        )
-
-        if has_joined:
-            keyboard = [
-                [{ "text": "Leave Event", "callback_data": f"leave:{event['id']}" }],
-                [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
-            
-            ]
-        else:
-            keyboard = [
-                [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
-                [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
-            ]
+        text = _event_text(event, participants, is_creator, include_participant_handles=is_creator)
+        keyboard = _build_event_inline_keyboard(event, has_joined=has_joined, is_creator=is_creator)
 
         await send_message(chat["id"], text, {"inline_keyboard": keyboard})
         return
 
     if data == "created:edit":
         await answer_callback_query(query["id"])
+        if not chat:
+            return
         await _start_edit_flow(chat["id"], user["id"])
         return
 
     if data == "created:delete":
         await answer_callback_query(query["id"])
+        if not chat:
+            return
         await _start_delete_flow(chat["id"], user["id"])
         return
 
     if data.startswith("jn:"):
         event_id = data.split(":", 1)[1]
-        
-        # Get the original message from the callback query
-        original_message = query.get("message", {})
-        message_id = original_message.get("message_id")
-        chat_id = original_message.get("chat", {}).get("id")
-        
-        # Join the event
+        inline_message_id = str(query.get("inline_message_id") or "")
+        if inline_message_id:
+            repository.register_shared_event_message(event_id, inline_message_id)
+
         ok, msg = repository.join_event(event_id, user["id"])
-        
+
         if ok:
-            # Get updated event details
             event = repository.get_event(event_id)
             if not event:
                 await answer_callback_query(query["id"], "✅ Joined!")
                 return
             participants = repository.get_event_participants(event_id)
             is_creator = event["creator_user_id"] == user["id"]
-            
-            # Check if current user is in participants
-            participant_ids = [p['user_id'] for p in participants]
-            has_joined = user['id'] in participant_ids
-            
-            # Rebuild the participant lines
-            participant_lines = []
-            for p in participants:
-                if is_creator:
-                    handle = f"@{p['telegram_handle']}" if p.get("telegram_handle") else "(no handle)"
-                    participant_lines.append(f"- {p['display_name']} {handle}")
-                else:
-                    participant_lines.append(f"- {p['display_name']}")
-            
-            creator_handle = f"@{event['creator_handle']}" if event.get("creator_handle") else "(no handle)"
-            
-            # Build the updated text
-            updated_text = (
-                f"{event['title']}\n"
-                f"Category: {category_label(event['category'])}\n"
-                f"Audience: {event['target_audience']}\n"
-                f"Time: {repository.format_dt(event['start_at'])}\n"
-                f"Location: {event['location_text']}\n"
-                f"Creator: {event['creator_name']} {creator_handle}\n"
-                f"Description: {event['description']}\n\n"
-                f"Participants ({len(participants)}):\n"
-                + ("\n".join(participant_lines) if participant_lines else "- No participants yet")
-            )
-            
-            # Build keyboard based on join status
-            if has_joined:
-                # User just joined, so show Leave button
-                keyboard = [
-                    [{ "text": "Leave Event", "callback_data": f"leave:{event['id']}" }],
-                    [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
-                ]
+
+            participant_ids = {p["user_id"] for p in participants}
+            has_joined = user["id"] in participant_ids
+            is_inline_shared = bool(query.get("inline_message_id"))
+            if is_inline_shared:
+                updated_text = _event_text(event, participants, is_creator=False, include_participant_handles=False)
+                keyboard = _build_shared_event_reply_markup(event)["inline_keyboard"]
             else:
-                # Shouldn't happen since we just joined, but just in case
-                keyboard = [
-                    [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
-                    [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
-                ]
-            
-            # EDIT the original message
-            await edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=updated_text,
-                reply_markup={"inline_keyboard": keyboard}
+                updated_text = _event_text(event, participants, is_creator, include_participant_handles=is_creator)
+                keyboard = _build_event_inline_keyboard(event, has_joined=has_joined, is_creator=is_creator)
+
+            await _edit_callback_message(
+                query,
+                updated_text,
+                {"inline_keyboard": keyboard},
             )
-            
-            # Show a brief popup that they joined
+
+            if is_inline_shared:
+                await _refresh_shared_event_messages(event_id)
+
             await answer_callback_query(query["id"], "✅ Joined!")
         else:
-            await answer_callback_query(query["id"], "❌ Cancel Failed to join")
-            await send_message(chat["id"], msg)
-        return
-
-    if data.startswith("subc:"):
-        if not profile or not profile.get("rc_name"):
-            ONBOARDING_FLOWS[user["id"]] = {"step": "rc"}
-            await send_message(chat["id"], "Set your RC first to manage subscriptions.", RC_PICKER_KEYBOARD)
-            return
-        category = data.split(":", 1)[1]
-        repository.subscribe_category(user["id"], category)
-        await answer_callback_query(query["id"], "Subscribed")
-        await send_message(chat["id"], f"Subscribed to {category_label(category)}")
+            await answer_callback_query(query["id"], msg)
+            if chat:
+                await send_message(chat["id"], msg)
         return
 
     if data.startswith("leave:"):
         event_id = data.split(":", 1)[1]
-        
-        # Get the original message
-        original_message = query.get("message", {})
-        message_id = original_message.get("message_id")
-        chat_id = original_message.get("chat", {}).get("id")
-        
-        # Leave the event
+        inline_message_id = str(query.get("inline_message_id") or "")
+        if inline_message_id:
+            repository.register_shared_event_message(event_id, inline_message_id)
+
         ok, msg = repository.leave_event(event_id, user["id"])
-        
+
         if ok:
-            # Get updated event details
             event = repository.get_event(event_id)
+            if not event:
+                await answer_callback_query(query["id"], "✅ Left event!")
+                return
             participants = repository.get_event_participants(event_id)
             is_creator = event["creator_user_id"] == user["id"]
-            
-            # Rebuild participant lines
-            participant_lines = []
-            for p in participants:
-                if is_creator:
-                    handle = f"@{p['telegram_handle']}" if p.get("telegram_handle") else "(no handle)"
-                    participant_lines.append(f"- {p['display_name']} {handle}")
-                else:
-                    participant_lines.append(f"- {p['display_name']}")
-            
-            creator_handle = f"@{event['creator_handle']}" if event.get("creator_handle") else "(no handle)"
-            
-            # Build updated text
-            updated_text = (
-                f"{event['title']}\n"
-                f"Category: {category_label(event['category'])}\n"
-                f"Audience: {event['target_audience']}\n"
-                f"Time: {repository.format_dt(event['start_at'])}\n"
-                f"Location: {event['location_text']}\n"
-                f"Creator: {event['creator_name']} {creator_handle}\n"
-                f"Description: {event['description']}\n\n"
-                f"Participants ({len(participants)}):\n"
-                + ("\n".join(participant_lines) if participant_lines else "- No participants yet")
+
+            participant_ids = {p["user_id"] for p in participants}
+            has_joined = user["id"] in participant_ids
+            is_inline_shared = bool(query.get("inline_message_id"))
+            if is_inline_shared:
+                updated_text = _event_text(event, participants, is_creator=False, include_participant_handles=False)
+                keyboard = _build_shared_event_reply_markup(event)["inline_keyboard"]
+            else:
+                updated_text = _event_text(event, participants, is_creator, include_participant_handles=is_creator)
+                keyboard = _build_event_inline_keyboard(event, has_joined=has_joined, is_creator=is_creator)
+
+            await _edit_callback_message(
+                query,
+                updated_text,
+                {"inline_keyboard": keyboard},
             )
-            
-            # Now user hasn't joined, so show Join button
-            keyboard = [
-                [{ "text": "Join Event", "callback_data": f"jn:{event['id']}" }],
-                [{ "text": "Subscribe Category", "callback_data": f"subc:{event['category']}" }],
-            ]
-            
-            # Edit the message
-            await edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=updated_text,
-                reply_markup={"inline_keyboard": keyboard}
-            )
-            
+
+            if is_inline_shared:
+                await _refresh_shared_event_messages(event_id)
+
             await answer_callback_query(query["id"], "✅ Left event!")
         else:
-            await answer_callback_query(query["id"], "❌ Cancel Failed to leave")
-            await send_message(chat["id"], msg)
+            await answer_callback_query(query["id"], msg)
+            if chat:
+                await send_message(chat["id"], msg)
         return
     
     await answer_callback_query(query["id"])

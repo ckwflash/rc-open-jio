@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -588,6 +589,110 @@ def get_profile(user_id: str) -> dict[str, Any] | None:
             (user_id,),
         )
         return cur.fetchone()
+
+
+def set_user_flow_state(
+    user_id: str,
+    flow_type: str,
+    state: dict[str, Any],
+    expires_in_minutes: int = 120,
+) -> None:
+    state_json = json.dumps(state)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into bot_user_flows (user_id, flow_type, state, updated_at, expires_at)
+            values (%s, %s, %s::jsonb, now(), now() + (%s::text || ' minutes')::interval)
+            on conflict (user_id, flow_type)
+            do update set
+              state = excluded.state,
+              updated_at = now(),
+              expires_at = excluded.expires_at
+            """,
+                        (user_id, flow_type, state_json, str(expires_in_minutes)),
+        )
+        conn.commit()
+
+
+def get_user_flow_state(user_id: str, flow_type: str) -> dict[str, Any] | None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            delete from bot_user_flows
+            where user_id = %s
+              and flow_type = %s
+              and expires_at <= now()
+            """,
+            (user_id, flow_type),
+        )
+        cur.execute(
+            """
+            select state
+            from bot_user_flows
+            where user_id = %s
+              and flow_type = %s
+              and expires_at > now()
+            """,
+            (user_id, flow_type),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        if not row:
+            return None
+        return row["state"]
+
+
+def clear_user_flow_state(user_id: str, flow_type: str) -> None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            delete from bot_user_flows
+            where user_id = %s and flow_type = %s
+            """,
+            (user_id, flow_type),
+        )
+        conn.commit()
+
+
+def clear_all_user_flow_states(user_id: str) -> None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            delete from bot_user_flows
+            where user_id = %s
+            """,
+            (user_id,),
+        )
+        conn.commit()
+
+
+def register_shared_event_message(event_id: str, inline_message_id: str) -> None:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into event_shared_messages (event_id, inline_message_id)
+            values (%s, %s)
+            on conflict (inline_message_id) do nothing
+            """,
+            (event_id, inline_message_id),
+        )
+        conn.commit()
+
+
+def list_shared_event_message_ids(event_id: str, limit: int = 500) -> list[str]:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select inline_message_id
+            from event_shared_messages
+            where event_id = %s
+            order by created_at desc
+            limit %s
+            """,
+            (event_id, limit),
+        )
+        rows = cur.fetchall()
+        return [str(row["inline_message_id"]) for row in rows]
 
 
 def claim_due_notifications(limit: int = 50, locker: str = "cron") -> list[dict[str, Any]]:
