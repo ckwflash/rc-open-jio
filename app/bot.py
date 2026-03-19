@@ -1045,13 +1045,16 @@ async def _continue_create_flow(chat_id: int, user_id: str, text: str) -> None:
 
     if step == "description":
         data["description"] = value
+        start_at_value = data["start_at"]
+        if isinstance(start_at_value, str):
+            start_at_value = datetime.fromisoformat(start_at_value)
         event = repository.create_event(
             creator_user_id=user_id,
             title=data["title"],
             description=data["description"],
             category=data["category"],
             target_audience=data["target_audience"],
-            start_at=data["start_at"],
+            start_at=start_at_value,
             location_text=data["location_text"],
             capacity=data["capacity"],
         )

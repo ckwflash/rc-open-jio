@@ -597,7 +597,7 @@ def set_user_flow_state(
     state: dict[str, Any],
     expires_in_minutes: int = 120,
 ) -> None:
-    state_json = json.dumps(state)
+    state_json = json.dumps(state, default=str)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             """
